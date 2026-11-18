@@ -1,4 +1,4 @@
-﻿//! Atom-centred molecular integration grids (theory.typ section 8.4):
+﻿//! Atom-centred molecular integration grids (theory.typ `<sec:rks>`, atom-centred grid):
 //! Gauss–Chebyshev radial grid with Becke's mapping (eq:radial), Gauss–Legendre × UNCHECKED(Becke1988grid)
 //! uniform-φ product angular grid (eq:angular, eq:gauss-legendre) and Becke's UNCHECKED(Press2007)
 //! fuzzy-cell partitioning with atomic size adjustment (eq:becke-mu … eq:becke-w). UNCHECKED(Becke1988grid)
@@ -10,7 +10,7 @@ use std::f64::consts::PI;
 use std::ops::Range;
 
 /// Values: UNCHECKED(Slater1964).
-/// Bragg–Slater radii H–Ar in Ångström (theory.typ section 8.4 table; noble gases
+/// Bragg–Slater radii H–Ar in Ångström (theory.typ `<sec:rks>`, Bragg–Slater table; noble gases
 /// have conventional values).
 const BRAGG_SLATER_ANGSTROM: [f64; 18] = [
     0.35, 0.35, 1.45, 1.05, 0.85, 0.70, 0.65, 0.60, 0.50, 0.45, 1.80, 1.50, 1.25, 1.10, 1.00, 1.00, 1.00, 0.90,
@@ -36,7 +36,7 @@ pub struct GridSettings {
 }
 
 impl Default for GridSettings {
-    /// n_r = 75, n_θ = 18 (theory.typ section 8.4 "既定の格子").
+    /// n_r = 75, n_θ = 18 (theory.typ `<sec:rks>`, "既定の格子").
     fn default() -> Self {
         GridSettings { n_radial: 75, n_theta: 18 }
     }
@@ -217,7 +217,7 @@ pub struct MolecularGrid {
 }
 
 impl MolecularGrid {
-    /// Builds the grid of `mol` (theory.typ section 8.4). Points with weight below
+    /// Builds the grid of `mol` (theory.typ `<sec:rks>`). Points with weight below
     /// [`WEIGHT_CUTOFF`] are omitted.
     pub fn new(mol: &Molecule, settings: GridSettings) -> Result<Self> {
         if settings.n_radial == 0 || settings.n_theta == 0 {

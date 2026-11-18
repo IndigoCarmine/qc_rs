@@ -1,4 +1,4 @@
-//! Closed-shell exchange-correlation functionals (theory.typ section 9).
+//! Closed-shell exchange-correlation functionals (theory.typ `<sec:xc>` and `<sec:cam>`).
 //!
 //! Every component is written once as an energy density f(ρ, σ) per volume in
 //! terms of [`Dual`] numbers; v_ρ = ∂f/∂ρ and v_σ = ∂f/∂σ come out of the
@@ -192,7 +192,7 @@ impl Functional {
     }
 
     /// Looks up a functional by name (case-insensitive, spaces ignored). Accepts the
-    /// names of theory.typ section 9.5 and PySCF-style spellings:
+    /// names in the functional table of theory.typ `<sec:xc>`, eq:cam-b3lyp and PySCF-style spellings:
     /// "hf"; "slater", "slater,", "lda,"; "svwn5", "slater,vwn5"; "svwn-rpa", "svwn_rpa",
     /// "slater,vwn_rpa"; "b88", "b88,"; "blyp", "b88,lyp"; "b3lyp", "b3lypg"; "b3lyp5";
     /// "cam-b3lyp", "camb3lyp", "cam_b3lyp".

@@ -273,6 +273,22 @@ impl Basis {
         Basis::new(mol, &BasisSetDefinition::builtin(name)?, BasisOptions::default())
     }
 
+    /// The basis of a single atom of the molecule: its shells, renumbered from AO 0
+    /// and attributed to atom 0, at their original centre. Used for the atomic
+    /// calculations of the initial guess.
+    pub fn atom_basis(&self, atom: usize) -> Basis {
+        let mut shells = Vec::new();
+        let mut offset = 0;
+        for sh in self.shells.iter().filter(|sh| sh.atom == atom) {
+            let mut sh = sh.clone();
+            sh.atom = 0;
+            sh.ao_offset = offset;
+            offset += sh.n_functions();
+            shells.push(sh);
+        }
+        Basis { shells, nao: offset }
+    }
+
     /// The shells, in AO order.
     pub fn shells(&self) -> &[Shell] {
         &self.shells

@@ -44,7 +44,9 @@ fn main() -> qc_rs::Result<()> {
 ```
 
 DFT の格子は `.with_grid(GridSettings::fine())`（既定は 75 × 18 × 36 点/原子）、デカルト d は `.with_cartesian_d(true)`、
-SCF の設定は `.with_scf_options(...)` で変えられます。勾配と最適化では SCF を DIIS 誤差 1e-10 まで収束させます
+SCF の設定は `.with_scf_options(...)` で変えられます。SCF の初期値は原子密度の重ね合わせです
+（`ScfOptions::initial_guess` でコアハミルトニアンにも変えられますが、大きい分子では収束しないことがあります）。
+XYZ ファイルは `Molecule::from_xyz(&text)` で読めます。勾配と最適化では SCF を DIIS 誤差 1e-10 まで収束させます
 （勾配の誤差は密度の誤差の1次なので、既定の 1e-7 では 1e-7 程度の誤差が残るため）。
 最適化が収束しなければエラー（`QcError::OptimizationNotConverged`）になります。
 低水準の関数（`run_rhf`、`run_rks`、`gradient::rhf_gradient`、`gradient::rks_gradient`、`bfgs_minimize` など）も公開しています。
@@ -62,6 +64,11 @@ cargo run --release --example h2o
 cargo build --release
 cargo test          # 全テスト（数十秒、テストプロファイルは opt-level 3）
 ```
+
+## 開発方針
+
+変更は目的別のブランチで管理します：結果を変えない高速化は `Imp/`、式や実装の誤りの修正は `Bug/`、
+計算理論の追加は `Feat/`。それぞれで守ることは [CONTRIBUTING.md](CONTRIBUTING.md) にあります。
 
 ## 理論仕様書
 
@@ -88,6 +95,20 @@ python -m venv .venv
 ```
 
 参照値の JSON はリポジトリに入っているので、`cargo test` に Python や PySCF は要りません。
+
+### テスト用分子の追加
+
+`tests/molecules/` に XYZ ファイル（座標は Å）を置くと、テスト `tests/molecules_pyscf.rs` が自動で拾い、
+RHF/6-31G と B3LYP/6-31G のエネルギーと勾配を PySCF の参照値と比べます。コードの変更は要りません。
+
+1. `tests/molecules/<名前>.xyz` を置く。電荷があるときは 2 行目（コメント行）に `charge=-1` のように書く（なければ 0）。
+   閉殻（電子数が偶数）、元素は H–Ar に限ります。
+2. 参照値を作り直す（変わっていない分子は再計算しません）：
+   `.venv/Scripts/python tests/reference/gen_molecule_reference.py`
+3. `cargo test --test molecules_pyscf -- --nocapture` で確認する。
+   一部だけ回すには環境変数 `QC_TEST_MOLECULES=名前1,名前2` を指定します。
+
+参照値のない分子や、参照値を作ったあとで座標を変えた分子があると、テストは飛ばさずに失敗します。
 
 達成した一致度（最大絶対偏差、原子単位）：
 

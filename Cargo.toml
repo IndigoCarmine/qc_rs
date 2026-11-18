@@ -1,0 +1,19 @@
+[package]
+name = "qc_rs"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-3-Clause"
+description = "Closed-shell Hartree-Fock and Kohn-Sham DFT energies, analytic gradients and geometry optimization"
+
+[dependencies]
+rayon = "1"
+
+[dev-dependencies]
+serde_json = "1"
+
+# Integral code is far too slow without optimization.
+[profile.dev]
+opt-level = 2
+
+[profile.test]
+opt-level = 3

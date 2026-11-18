@@ -142,6 +142,23 @@ Grimme 研究室の公開ページ（下の GrimmeD3web）で確かめた。
 
 DOI は Crossref（Pyykko2009 は doi.org のハンドル解決）で著者・題名・巻・ページを確認した。
 
+### 振動数解析と熱化学
+
+`docs/theory.typ` の節 `<sec:freq>`。`eq:hess-fd`、`eq:hess-sym` は差分の定義から導いたもの（DERIVED）。
+Ochterski の2つの文書は 2026-11-19 に gaussian.com で閲覧し、`eq:tr-vectors` の並進・回転ベクトルの作り方と
+`eq:thermo-*` の式（並進・電子・回転・振動の各寄与、H = E + k_B T、G = H − TS）がそれと同じ形であることを確かめた
+（照合表には載せていない。コードの実装後にタグで管理する）。書籍2冊は未入手で、`eq:ir-intensity` の式と係数はどの文献とも照合していない。
+
+| キー | 論文 | DOI | ファイル名 | 確認する内容 | PDF |
+|---|---|---|---|---|---|
+| Wilson1955 | E. B. Wilson, J. C. Decius, P. C. Cross, *Molecular Vibrations* (McGraw-Hill, 1955; Dover 1980) | （書籍） | （書籍） | 質量加重座標、Eckart 条件、基準振動、IR 強度（双極子の基準座標微分による積分吸収係数） | なし |
+| McQuarrie1999 | D. A. McQuarrie, J. D. Simon, *Molecular Thermodynamics* (University Science Books, 1999) | （書籍） | （書籍） | 並進・回転・振動・電子の分配関数とその熱力学量（Ochterski2000 が引用している版） | なし |
+| Ochterski1999 | J. W. Ochterski, "Vibrational Analysis in Gaussian" (Gaussian, Inc., 1999)、gaussian.com/vib | — | `ochterski1999_vib.pdf` | 主慣性軸、並進・回転ベクトル（Sayvetz 条件）、内部座標への変換、振動数の単位換算 | なし |
+| Ochterski2000 | J. W. Ochterski, "Thermochemistry in Gaussian" (Gaussian, Inc., 2000)、gaussian.com/thermo | — | `ochterski2000_thermo.pdf` | 並進・電子・回転・振動の寄与、零点エネルギー、虚数振動数を除くこと、H と G | なし |
+| CIAAW2013 | J. Meija ほか, *Pure Appl. Chem.* **88**, 265 (2016)「Atomic weights of the elements 2013」 | 10.1515/pac-2015-0305 | `ciaaw2013.pdf` | 標準原子量（H–Ar。範囲で与えられる元素は慣用値） | なし |
+
+CIAAW2013 の DOI は Crossref で著者・題名・巻・ページを確認した。
+
 ### 基底関数
 
 データは Basis Set Exchange から取得したもので、原論文の表の値との照合はしていません。
@@ -158,4 +175,4 @@ DOI は Crossref（Pyykko2009 は doi.org のハンドル解決）で著者・�
 
 | キー | 出典 | 確認する内容 |
 |---|---|---|
-| CODATA2018 | NIST CODATA 2018 推奨値 | Bohr 半径 0.529177210903 Å |
+| CODATA2018 | NIST CODATA 2018 推奨値（E. Tiesinga ほか, *Rev. Mod. Phys.* **93**, 025010 (2021)、DOI 10.1103/RevModPhys.93.025010） | Bohr 半径 0.529177210903 Å。振動数・熱化学・IR 強度で使う E_h/hc = 219474.6313632 cm⁻¹、m_e/m_u = 5.48579909065×10⁻⁴、E_h/k_B = 315775.02480407 K、m_u = 1.66053906660×10⁻²⁷ kg、ε_0 = 8.8541878128×10⁻¹² F/m（h、k_B、N_A、e、c は定義値） |

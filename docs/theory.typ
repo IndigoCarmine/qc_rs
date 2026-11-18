@@ -901,3 +901,176 @@ $ E_"tot" = E_"SCF" + E_"disp", quad
 $E_"SCF"$ は @eq:e-rks（HF では @eq:e-rhf）、その勾配は @eq:grad、$E_"disp"$ の勾配は @eq:d3-grad。
 構造最適化（@sec:opt）はこの $E_"tot"$ とその勾配を最小化する。分散補正を指定しなければ $E_"tot" = E_"SCF"$ のままである。
 
+= 振動数解析と熱化学 <sec:freq>
+
+解析的勾配（@eq:grad、分散補正があれば @eq:d3-total）を中心差分して Hessian を作り、
+質量加重して並進・回転を除いた内部空間で対角化し、調和振動数・基準振動・IR 強度を求める。
+さらに理想気体・剛体回転子・調和振動子の近似で零点エネルギー、エンタルピー、Gibbs エネルギーを求める
+（Wilson, Decius, Cross 1955；Ochterski 1999「Vibrational Analysis in Gaussian」；McQuarrie, Simon 1999；Ochterski 2000「Thermochemistry in Gaussian」）。
+
+対象外とするもの：解析的 Hessian、低振動数の補正（qRRHO など）、対称数の自動判定、
+途中からの再開、変位ごとの計算の並列化、開殻（電子の縮重度は 1 に固定）。
+
+振動数は停留点（勾配がほぼ 0 の構造、@sec:opt で最適化した構造）でだけ意味を持つ。
+停留点でない構造では回転の分離（@eq:tr-vectors）が厳密でなくなるので、実装は勾配の大きさを利用者に示す。
+
+== 中心差分による Hessian
+
+デカルト座標 $vb(x) in RR^(3 N_"atom")$（$a_0$）、全エネルギー $E_"tot"$（@eq:d3-total）の勾配 $vb(g)(vb(x))$ について
+
+$ H_(i j) = (g_i (vb(x) + h vb(e)_j) - g_i (vb(x) - h vb(e)_j)) / (2 h), quad h = 5 times 10^(-3) thin a_0 $ <eq:hess-fd>
+
+（$vb(e)_j$ は座標 $j$ の単位ベクトル。）1回の変位で勾配の全成分が得られるので、列 $j$ ごとに2回、
+合計 $6 N_"atom"$ 回の勾配計算になる。変位した構造の SCF の初期値には基準構造の収束した密度行列を使う
+（収束先は変わらず、反復が減るだけ）。単位は $E_h slash a_0^2$。
+
+*誤差。* Taylor 展開より $H_(i j)$ の打ち切り誤差は $h^2 slash 6 dot partial^3 g_i slash partial x_j^3 = O(h^2)$。
+勾配の誤差を $epsilon$ とすると、差分による誤差は $epsilon slash h$ 程度である。
+勾配を計算する SCF は $max abs(e_(mu nu)) < 10^(-10)$ まで収束させる（@sec:grad）ので $epsilon tilde 10^(-10)$ 程度と見込み、
+$h = 5 times 10^(-3)$ では $epsilon slash h tilde 2 times 10^(-8) thin E_h slash a_0^2$、打ち切り誤差は $h^2 slash 6 approx 4 times 10^(-6)$ に3階微分を掛けたものとなる。
+DFT では格子による勾配の誤差が加わる。$h$ は利用者が変更できるようにする。
+（この式と誤差の見積もりは差分の定義から導いたもので、文献の式ではない。）
+
+== 対称化
+
+差分の誤差のため $H$ は厳密には対称でない。対称化した行列を使い、非対称性を診断値として利用者に示す：
+
+$ H <- 1/2 (H + H^T), quad delta_"asym" = max_(i j) abs(H_(i j) - H_(j i)) $ <eq:hess-sym>
+
+DFT では格子の重みの核座標依存性を無視している（@eq:xc-grad）ので、勾配はエネルギーの厳密な微分ではなく、
+$delta_"asym"$ は格子が粗いほど大きくなる。並進不変性 $sum_A H_(A_x, j) = 0$ も同じ理由で近似的にしか成り立たない。
+並進・回転の成分は @eq:tr-vectors で取り除く。
+
+== 質量加重
+
+原子 $A$ の質量を $m_A$（統一原子質量単位 u）とし、座標 $i$ の属する原子の質量を $m_i$ と書く：
+
+$ tilde(H)_(i j) = H_(i j) / sqrt(m_i m_j) $ <eq:mass-weight>
+
+（単位は $E_h slash (a_0^2 thin "u")$。）質量加重座標は $q_i = sqrt(m_i) x_i$ である。
+
+*質量の既定値。* IUPAC/CIAAW 2013 の標準原子量（Meija ら 2016。範囲で与えられる元素は慣用値）を使う：
+
+#align(center, table(
+  columns: 6, stroke: 0.4pt, inset: 4pt, align: center,
+  [元素], [u], [元素], [u], [元素], [u],
+  [H], [1.008], [He], [4.002602], [Li], [6.94],
+  [Be], [9.0121831], [B], [10.81], [C], [12.011],
+  [N], [14.007], [O], [15.999], [F], [18.998403163],
+  [Ne], [20.1797], [Na], [22.98976928], [Mg], [24.305],
+  [Al], [26.9815385], [Si], [28.085], [P], [30.973761998],
+  [S], [32.06], [Cl], [35.45], [Ar], [39.948],
+))
+
+利用者は原子ごとに質量を与えてよい（同位体置換など）。
+*未確認：* PySCF の振動解析の既定の質量がこの表と同じか（PySCF のコードは読まない方針なので、比較テストの数値で確かめる。
+違っていたら比較テストでは質量を明示して揃える）。
+
+== 並進と回転の分離
+
+質量の中心 $vb(R)_"cm" = sum_A m_A vb(R)_A slash M$（$M = sum_A m_A$）を原点とし、慣性テンソル
+$I = sum_A m_A (abs(vb(r)_A)^2 bb(1) - vb(r)_A vb(r)_A^T)$、$vb(r)_A = vb(R)_A - vb(R)_"cm"$ を対角化して
+主慣性モーメント $I_1 <= I_2 <= I_3$（$"u" thin a_0^2$）と主軸 $vb(u)_1, vb(u)_2, vb(u)_3$ を得る。
+質量加重座標での並進 $vb(t)_alpha$（$alpha = x, y, z$）と主軸まわりの回転 $vb(r)_a$ のベクトルの、原子 $A$ の成分は
+
+$ (vb(t)_alpha)_A = sqrt(m_A) thin vb(e)_alpha, quad
+  (vb(r)_a)_A = sqrt(m_A) thin vb(u)_a times vb(r)_A $ <eq:tr-vectors>
+
+である。重心を原点にとり主軸を使うと、これら6本は互いに直交し、$abs(vb(t)_alpha)^2 = M$、$abs(vb(r)_a)^2 = I_a$ となる
+（Eckart 条件。Wilson ら 1955）。並進・回転のベクトルの作り方は Ochterski（1999）と同じ（同文書は残りの基底を Schmidt 直交化で作るが、ここでは下のとおり射影の対角化で作る。内部ブロックの固有値はどちらでも同じ）。
+
+- 回転 $a$ は $I_a > 10^(-6) I_3$ のときだけ残す。直線分子では $I_1 approx 0$ なので 5 本、原子（$I_3 = 0$）では回転はなく 3 本になる。
+  この閾値は数値上の取り決めで、文献の値ではない。直線分子かどうか（@eq:thermo-rot）もこの判定で決める。
+- 残したベクトルを正規化し、念のため修正 Gram–Schmidt 法で直交化して $n_"tr"$ 本の正規直交系 $D_"tr"$ を作る。
+- 射影 $P = bb(1) - D_"tr" D_"tr"^T$ を対角化し、固有値が 1 の固有ベクトル（$3 N_"atom" - n_"tr"$ 本）を内部空間の正規直交基底 $D_"int"$ とする
+  （固有値は 0 と 1 だけなので、$1 slash 2$ を境に分ければよい）。
+- 内部空間のブロック $D_"int"^T tilde(H) D_"int"$ を対角化し、固有値 $lambda_k$ と固有ベクトル $vb(c)_k$ から
+  質量加重の基準振動 $vb(l)_k = D_"int" vb(c)_k$（$abs(vb(l)_k) = 1$）を得る。$P tilde(H) P$ を対角化して 0 に近い固有値を捨てる方法は、
+  振動数の小さい本物の振動と区別がつかないので使わない。
+
+デカルト座標での変位は $x_i = l_(k, i) slash sqrt(m_i)$ に比例する。
+
+== 調和振動数
+
+$lambda_k$ の単位 $E_h slash (a_0^2 thin "u")$ を原子単位（$E_h slash (a_0^2 m_e)$）に直すと角振動数 $omega_k = sqrt(lambda_k m_e slash m_u)$（$E_h slash ħ$）、
+波数は $tilde(nu)_k = omega_k E_h slash (2 pi ħ c)$ である：
+
+$ tilde(nu)_k = cases(
+  c_nu sqrt(lambda_k) & (lambda_k >= 0),
+  -c_nu sqrt(-lambda_k) & (lambda_k < 0)
+), quad
+c_nu = E_h / (h c) sqrt(m_e / m_u) = 5140.487 thin "cm"^(-1) slash sqrt(E_h slash (a_0^2 thin "u")) $ <eq:freq>
+
+（定数は CODATA 2018：$E_h slash h c = 219474.6313632 thin "cm"^(-1)$、$m_e slash m_u = 5.48579909065 times 10^(-4)$。
+実装ではこの2つから $c_nu$ を計算する。）$lambda_k < 0$（虚数振動数）は負の波数で表し、熱化学からは除く。
+振動数の小さい正の振動はそのまま熱化学に入れる（低振動数の補正は対象外）。
+
+== IR 強度
+
+双極子モーメント $vb(mu)$（@eq:dipole、$e thin a_0$）を Hessian と同じ変位で計算し、中心差分で微分する：
+
+$ (partial vb(mu)) / (partial x_j) = (vb(mu)(vb(x) + h vb(e)_j) - vb(mu)(vb(x) - h vb(e)_j)) / (2 h), quad
+  (partial vb(mu)) / (partial Q_k) = sum_j (partial vb(mu)) / (partial x_j) l_(k, j) / sqrt(m_j) $
+
+（$Q_k$ は質量加重の基準座標、単位 $sqrt("u") thin a_0$。$partial vb(mu) slash partial Q_k$ の単位は $e slash sqrt("u")$。）
+基本音の積分吸収係数（自然対数による、二重調和近似）は
+
+$ A_k = N_A / (12 epsilon_0 c^2) abs((partial vb(mu)) / (partial Q_k))^2 $ <eq:ir-intensity>
+
+（SI 単位。CGS（Gauss 単位）では $4 pi epsilon_0 = 1$ として $A_k = N_A pi slash (3 c^2) abs(partial vb(mu) slash partial Q_k)^2$ と同じ式になる。）
+$A_k$ は振動 $k$ の吸収帯の、自然対数のモル吸光係数を波数で積分したものである。$partial vb(mu) slash partial Q_k$ を $"C" slash sqrt("kg")$ で入れると $A_k$ は m/mol になる。
+原子単位からの換算は
+
+$ A_k ["km/mol"] = (N_A e^2) / (12 epsilon_0 c^2 m_u) times 10^(-3) dot abs((partial vb(mu)) / (partial Q_k))^2 [e^2 slash "u"]
+  = 974.8801 dot abs((partial vb(mu)) / (partial Q_k))^2 [e^2 slash "u"] $
+
+（CODATA 2018 の $N_A$、$e$、$epsilon_0$、$c$、$m_u$ から。$("D"slash angstrom)^2 slash "u"$ 単位なら係数は $42.2561$。）
+実装は定数から係数を計算する。電荷 $q$ を持つ分子では $vb(mu)$ が原点に依るが（原点を $vb(c)$ ずらすと $-q vb(c)$ だけ変わる）、
+差は定数なので $partial vb(mu) slash partial x_j$ は原点に依らない。また基準振動 $vb(l)_k$ は質量加重の並進と直交する（重心を動かさない）ので、
+分子全体の並進による $vb(mu)$ の変化は $A_k$ に入らない。
+*未確認：* この式と係数を Wilson ら（1955）の該当箇所で照合していない。PySCF が同じ定義（自然対数、km/mol）で強度を出すかは比較テストで確かめる。
+
+== 熱化学
+
+温度 $T$（既定 298.15 K）、圧力 $p$（既定 101325 Pa）。理想気体・剛体回転子・調和振動子の近似で、
+すべて1分子あたり（$E_h$、$E_h slash "K"$）で計算する。$k_B$ は CODATA 2018 の $E_h slash k_B = 315775.02480407 thin "K"$ から、
+並進の分配関数だけは SI（$h$、$k_B$ は定義値、$m_u = 1.66053906660 times 10^(-27)$ kg）で計算する。
+以下は Ochterski（2000）の式（McQuarrie と Simon 1999 の式を引いたもの）で、そこではモルあたり（$R = N_A k_B$）で書かれている。
+
+*並進。* $M$ は分子の質量：
+
+$ q_"t" = ((2 pi M k_B T) / h^2)^(3 slash 2) (k_B T) / p, quad
+  E_"t" = 3/2 k_B T, quad S_"t" = k_B (ln q_"t" + 5/2), quad C_"v,t" = 3/2 k_B $ <eq:thermo-trans>
+
+*回転。* 回転温度 $Theta_a = ħ^2 slash (2 I_a k_B)$（原子単位では $Theta_a = (E_h slash k_B) slash (2 I_a m_u slash m_e)$、$I_a$ は $"u" thin a_0^2$）。
+対称数 $sigma$ は利用者が与え、既定は 1（自動判定は対象外）。上の行が直線分子（@eq:tr-vectors の判定で回転が2本、$Theta = Theta_2 = Theta_3$）、
+下の行が非直線分子：
+
+$ q_"r" = T / (sigma Theta), quad E_"r" = k_B T, quad S_"r" = k_B (ln q_"r" + 1), quad C_"v,r" = k_B \
+  q_"r" = sqrt(pi) / sigma (T^(3 slash 2)) / sqrt(Theta_1 Theta_2 Theta_3), quad
+  E_"r" = 3/2 k_B T, quad S_"r" = k_B (ln q_"r" + 3/2), quad C_"v,r" = 3/2 k_B $ <eq:thermo-rot>
+
+原子では回転の寄与はすべて 0。
+
+*振動。* 実の振動数（$tilde(nu)_k > 0$）ごとに $Theta_k = omega_k E_h slash k_B$（$omega_k$ は @eq:freq の $E_h slash ħ$ 単位）、$x_k = Theta_k slash T$ として、
+エネルギーの原点を電子エネルギーの極小（ポテンシャルの底）にとる：
+
+$ E_"ZPE" = sum_k 1/2 k_B Theta_k, quad
+  E_"v" = sum_k k_B Theta_k (1/2 + 1 / (e^(x_k) - 1)), \
+  S_"v" = k_B sum_k [x_k / (e^(x_k) - 1) - ln(1 - e^(-x_k))], quad
+  C_"v,v" = k_B sum_k e^(x_k) (x_k / (e^(x_k) - 1))^2 $ <eq:thermo-vib>
+
+$E_"v"$ は零点エネルギーを含む。虚数振動数は和に入れない。
+
+*電子。* 閉殻一重項だけを扱うので電子状態の縮重度は 1、励起状態は無視する：
+
+$ q_"e" = 1, quad E_"e" = 0, quad S_"e" = 0 $ <eq:thermo-elec>
+
+*合計。* 電子エネルギー $E_"el"$ は基準構造の $E_"tot"$（@eq:d3-total。分散補正なしなら $E_"SCF"$）とする：
+
+$ U = E_"el" + E_"t" + E_"r" + E_"v" + E_"e", quad
+  H = U + k_B T, quad
+  S = S_"t" + S_"r" + S_"v" + S_"e", quad
+  G = H - T S $ <eq:thermo-total>
+
+あわせて $E_"el" + E_"ZPE"$ と $C_"v" = C_"v,t" + C_"v,r" + C_"v,v"$ を示す。

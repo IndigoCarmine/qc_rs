@@ -60,6 +60,12 @@ SOURCES = {
     "d3-c8": ["Grimme2010"], "d3-bj": ["Grimme2011", "Johnson2005"], "d3-zero": ["Grimme2010"],
     "d3-grad": [], "d3-dedr": [],  # derived here (chain rule)
     "d3-total": ["Grimme2010"],
+    "hess-fd": [], "hess-sym": [],  # derived here (central difference of the analytic gradient)
+    "mass-weight": ["Wilson1955", "CIAAW2013"], "tr-vectors": ["Wilson1955", "Ochterski1999"],
+    "freq": ["Wilson1955", "CODATA2018"], "ir-intensity": ["Wilson1955", "CODATA2018"],
+    "thermo-trans": ["Ochterski2000", "McQuarrie1999"], "thermo-rot": ["Ochterski2000", "McQuarrie1999"],
+    "thermo-vib": ["Ochterski2000", "McQuarrie1999"], "thermo-elec": ["Ochterski2000", "McQuarrie1999"],
+    "thermo-total": ["Ochterski2000"],
 }
 
 FILES = sorted(glob.glob("src/*.rs") + glob.glob("src/functional/*.rs"))

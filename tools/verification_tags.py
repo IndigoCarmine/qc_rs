@@ -37,7 +37,7 @@ SOURCES = {
     "eri-sym": ["Szabo1996"], "schwarz": ["Haser1989"],
     "density": ["Roothaan1951"], "jk": ["Roothaan1951"], "fock-rhf": ["Roothaan1951"],
     "roothaan": ["Roothaan1951"], "e-rhf": ["Roothaan1951"],
-    "orth": ["Szabo1996"], "jacobi": ["Golub2013"],
+    "orth": ["Szabo1996"], "householder": ["Golub2013"], "ql-shift": ["Golub2013"],
     "sad": ["VanLenthe2006"], "sad-occ": ["VanLenthe2006"],
     "diis-err": ["Pulay1982"], "diis": ["Pulay1980"],
     "e-rks": ["Johnson1993", "Kohn1965"], "fock-rks": ["Johnson1993", "Kohn1965"], "rho": ["Johnson1993"],

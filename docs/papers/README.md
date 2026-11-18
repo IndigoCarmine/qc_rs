@@ -87,7 +87,7 @@ PySCF との数値一致（`tests/`）は全項目で確認済みですが、そ
 | VanLenthe2006 | J. H. Van Lenthe ほか, *J. Comput. Chem.* **27**, 926 (2006) | 10.1002/jcc.20393 | `vanlenthe2006_sad.pdf` | 原子密度の重ね合わせによる初期値 | なし |
 | Almlof1982 | J. Almlöf, K. Faegri, K. Korsell, *J. Comput. Chem.* **3**, 385 (1982) | 10.1002/jcc.540030314 | `almlof1982.pdf` | 原子密度の初期値の原典 | なし |
 | Szabo1996 | A. Szabo, N. S. Ostlund, *Modern Quantum Chemistry* (Dover, 1996) | （書籍） | （書籍） | 核間反発、対称直交化、2電子積分の対称性、双極子 | なし |
-| Golub2013 | G. H. Golub, C. F. Van Loan, *Matrix Computations*, 4th ed. (2013) | （書籍） | （書籍） | Jacobi 法の回転角 | なし |
+| Golub2013 | G. H. Golub, C. F. Van Loan, *Matrix Computations*, 4th ed. (2013) | （書籍） | （書籍） | Householder 三重対角化、陰的シフト QL 法 | なし |
 
 ### 密度汎関数法
 

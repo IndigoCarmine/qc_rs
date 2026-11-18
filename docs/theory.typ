@@ -738,6 +738,28 @@ $partial_x$ は電子座標での微分。基底関数の2階微分 $nabla parti
 - 並進不変性： $sum_A dif E slash dif vb(R)_A = vb(0)$（RHF では $10^(-10)$ 以下、DFT では格子誤差の範囲）
 - 中心差分との一致： $(E(X_A + h) - E(X_A - h)) slash (2h)$、$h = 10^(-3) a_0$
 
+= 構造最適化 <sec:opt>
+
+デカルト座標 $vb(x) in RR^(3 N_"atom")$、勾配 $vb(g) = dif E slash dif vb(x)$、近似 Hessian $H$ による準 Newton 法。
+
++ $H_0 = 0.5 thin I$（$E_h slash a_0^2$）、信頼半径 $Delta = 0.3 thin a_0$。
++ ステップ $vb(s) = -H^(-1) vb(g)$。$abs(vb(s)) > Delta$ なら $vb(s) <- vb(s) Delta slash abs(vb(s))$。
++ $vb(x)_"new" = vb(x) + vb(s)$ でエネルギーと勾配を計算する。
++ エネルギーが上がった場合（$E_"new" > E + 10^(-8)$）：ステップを棄却し、
+  $Delta <- min(Delta, abs(vb(s))) slash 2$ として同じ $vb(g), H$ で 2 に戻る
+  （$Delta < 10^(-5)$ になったらエラー）。棄却したステップより必ず短くするために $abs(vb(s))$ との最小値をとる。
++ 受理した場合：$vb(y) = vb(g)_"new" - vb(g)$ として BFGS 更新
+  $ H <- H + (vb(y) vb(y)^T) / (vb(y)^T vb(s)) - (H vb(s) vb(s)^T H) / (vb(s)^T H vb(s)) $ <eq:bfgs>
+  ただし $vb(y)^T vb(s) <= 10^(-10)$ のときは更新しない。ステップが信頼半径で切られずに受理されたら
+  $Delta <- min(2 Delta, 0.5)$。
++ 収束判定（すべて満たすこと。括弧内は既定値）：
+  $max abs(g_i) < 4.5 times 10^(-4)$、$"rms"(vb(g)) < 3 times 10^(-4)$、
+  $max abs(s_i) < 1.8 times 10^(-3)$、$"rms"(vb(s)) < 1.2 times 10^(-3)$。
+  閾値は利用者が変更できるようにする。ステップの判定には受理したステップが必要なので、
+  出発点が極小でも少なくとも1ステップは進む。
+
+SCF の初期値には前の構造の密度行列を使ってよい。$H^(-1) vb(g)$ は連立方程式を解いて求める。
+
 = 分散補正 DFT-D3 <sec:d3>
 
 Grimme ら（2010）の DFT-D3 の2体項を、Becke–Johnson 減衰（D3(BJ)、Grimme, Ehrlich, Goerigk 2011）と
@@ -867,24 +889,3 @@ $ (dif E_"disp") / (dif vb(R)_A) = sum_(B != A) [(partial e_(A B)) / (partial r)
 （連鎖律による導出で、文献の式ではない。）各対は $vb(R)_A - vb(R)_B$ だけに依るので並進不変性
 $sum_A dif E_"disp" slash dif vb(R)_A = vb(0)$ が厳密に成り立つ。検証は中心差分（@sec:grad の検証用の恒等式と同じ）で行う。
 
-= 構造最適化 <sec:opt>
-
-デカルト座標 $vb(x) in RR^(3 N_"atom")$、勾配 $vb(g) = dif E slash dif vb(x)$、近似 Hessian $H$ による準 Newton 法。
-
-+ $H_0 = 0.5 thin I$（$E_h slash a_0^2$）、信頼半径 $Delta = 0.3 thin a_0$。
-+ ステップ $vb(s) = -H^(-1) vb(g)$。$abs(vb(s)) > Delta$ なら $vb(s) <- vb(s) Delta slash abs(vb(s))$。
-+ $vb(x)_"new" = vb(x) + vb(s)$ でエネルギーと勾配を計算する。
-+ エネルギーが上がった場合（$E_"new" > E + 10^(-8)$）：ステップを棄却し、
-  $Delta <- min(Delta, abs(vb(s))) slash 2$ として同じ $vb(g), H$ で 2 に戻る
-  （$Delta < 10^(-5)$ になったらエラー）。棄却したステップより必ず短くするために $abs(vb(s))$ との最小値をとる。
-+ 受理した場合：$vb(y) = vb(g)_"new" - vb(g)$ として BFGS 更新
-  $ H <- H + (vb(y) vb(y)^T) / (vb(y)^T vb(s)) - (H vb(s) vb(s)^T H) / (vb(s)^T H vb(s)) $ <eq:bfgs>
-  ただし $vb(y)^T vb(s) <= 10^(-10)$ のときは更新しない。ステップが信頼半径で切られずに受理されたら
-  $Delta <- min(2 Delta, 0.5)$。
-+ 収束判定（すべて満たすこと。括弧内は既定値）：
-  $max abs(g_i) < 4.5 times 10^(-4)$、$"rms"(vb(g)) < 3 times 10^(-4)$、
-  $max abs(s_i) < 1.8 times 10^(-3)$、$"rms"(vb(s)) < 1.2 times 10^(-3)$。
-  閾値は利用者が変更できるようにする。ステップの判定には受理したステップが必要なので、
-  出発点が極小でも少なくとも1ステップは進む。
-
-SCF の初期値には前の構造の密度行列を使ってよい。$H^(-1) vb(g)$ は連立方程式を解いて求める。

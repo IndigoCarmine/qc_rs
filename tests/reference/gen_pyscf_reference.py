@@ -3,7 +3,9 @@
 Usage (from the repository root):
     .venv/Scripts/python tests/reference/gen_pyscf_reference.py
 
-Writes tests/reference/pyscf_reference.json.
+Writes tests/reference/pyscf_reference.json.  With --hessians-only, only the
+"hessians" section is (re)computed and the other sections of the existing JSON
+are kept unchanged (a full run reproduces them only to about 1e-9).
 
 The basis sets are read from data/basis/*.gbs (Basis Set Exchange, Gaussian94
 format) and handed to PySCF explicitly, so that both programs use exactly the
@@ -17,6 +19,7 @@ import numpy as np
 import pyscf
 from pyscf import gto, scf, dft
 from pyscf.geomopt import geometric_solver
+from pyscf.hessian import thermo
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 ANG = 1.0 / 0.529177210903  # Angstrom -> Bohr (CODATA 2018)
@@ -73,6 +76,8 @@ GEOMS_ANG = {
     "h2co": [("C", (0.0, 0.0, -0.53)), ("O", (0.0, 0.0, 0.68)), ("H", (0.0, 0.94, -1.11)),
              ("H", (0.0, -0.94, -1.11))],
     "hcl": [("H", (0.0, 0.0, 0.0)), ("Cl", (0.0, 0.0, 1.30))],
+    # Linear molecule for the vibrational analysis (5 removed external modes).
+    "hcn": [("H", (0.0, 0.0, -1.10)), ("C", (0.0, 0.0, 0.0)), ("N", (0.0, 0.0, 1.12))],
 }
 GEOMS = {k: [(s, tuple(float(x) * ANG for x in xyz)) for s, xyz in v] for k, v in GEOMS_ANG.items()}
 
@@ -155,6 +160,143 @@ def optimize(geom_name, basis, method):
     }
 
 
+HESS_STEP = 5e-3  # Bohr; the displacement h of eq:hess-fd, used here for the dipole derivatives
+THERMO_CONDITIONS = [(298.15, 101325.0), (500.0, 2.0e5)]  # (T in K, p in Pa)
+# eq:ir-intensity: A [km/mol] = N_A e^2 / (12 eps0 c^2 m_u) * 1e-3 * |dmu/dQ|^2 [e^2/u]  (CODATA 2018)
+_NA, _E, _EPS0, _C, _MU = 6.02214076e23, 1.602176634e-19, 8.8541878128e-12, 299792458.0, 1.66053906660e-27
+IR_KM_MOL = _NA * _E ** 2 / (12.0 * _EPS0 * _C ** 2 * _MU) * 1e-3
+
+
+def _wavenumber(f):
+    """PySCF returns imaginary frequencies as imaginary numbers; store them as negative wavenumbers."""
+    f = complex(f)
+    return f.real if f.imag == 0.0 else -abs(f.imag)
+
+
+def _thermo_values(t):
+    out = {}
+    for k, (v, _unit) in t.items():
+        if k.startswith("qrrho") or k in ("temperature", "pressure"):
+            continue
+        if k == "sym_number":
+            out[k] = int(v)
+        elif np.ndim(v) == 0:
+            out[k] = float(v)
+        else:  # rot_const: infinite for the zero moment of a linear molecule -> null
+            out[k] = [float(x) if np.isfinite(x) else None for x in v]
+    return out
+
+
+def hessian_entry(geom_name, basis, method):
+    """Optimise (geomeTRIC, same parameters as optimize()), then the analytic Hessian, harmonic analysis
+    and thermochemistry from PySCF.  For DFT the fine grid is used for the optimisation as well.
+
+    The IR intensities are not a PySCF result (this PySCF has no IR module): PySCF's dipole moments
+    (mf.dip_moment) at +-h Cartesian displacements are central-differenced, contracted with the
+    normal modes from PySCF's thermo.harmonic_analysis, and converted with *our* formula
+    (docs/theory.typ eq:ir-intensity, km/mol).
+    """
+    grid = FINE_GRID
+    mol = make_mol(GEOMS[geom_name], basis, False)
+    mf = make_mf(mol, method, grid=grid)
+    params = {"convergence_energy": 1e-9, "convergence_grms": 3e-6, "convergence_gmax": 4.5e-6,
+              "convergence_drms": 1.2e-5, "convergence_dmax": 1.8e-5}
+    mol_eq = geometric_solver.optimize(mf, maxsteps=200, **params)
+    mf = make_mf(mol_eq, method, grid=grid)
+    e = mf.kernel()
+    assert mf.converged
+    g = mf.nuc_grad_method().kernel()
+    h4 = mf.Hessian().kernel()  # (natm, natm, 3, 3)
+    n = mol_eq.natm
+    hess = h4.transpose(0, 2, 1, 3).reshape(3 * n, 3 * n)
+    masses = mol_eq.atom_mass_list(isotope_avg=True)
+    ha = thermo.harmonic_analysis(mol_eq, h4)
+    # norm_mode[k] is the Cartesian displacement l_k / sqrt(m) of the unit mass-weighted mode l_k.
+    modes = ha["norm_mode"].reshape(-1, 3 * n)
+    lnorm = np.linalg.norm(modes * np.sqrt(np.repeat(masses, 3)), axis=1)
+    assert np.allclose(lnorm, 1.0, atol=1e-10), lnorm
+
+    # Dipole derivatives by central differences of PySCF's dipole moment (tightly converged SCF).
+    coords = mol_eq.atom_coords()
+    syms = [mol_eq.atom_symbol(i) for i in range(n)]
+    dm0 = mf.make_rdm1()
+    dmu = np.zeros((3 * n, 3))
+    for j in range(3 * n):
+        mu = []
+        for sgn in (1.0, -1.0):
+            c = coords.copy()
+            c[j // 3, j % 3] += sgn * HESS_STEP
+            mf_d = make_mf(make_mol(list(zip(syms, map(tuple, c))), basis, False), method, grid=grid)
+            mf_d.conv_tol = 1e-13
+            mf_d.conv_tol_grad = 1e-10
+            mf_d.kernel(dm0=dm0)
+            assert mf_d.converged
+            mu.append(mf_d.dip_moment(unit="AU", verbose=0))
+        dmu[j] = (mu[0] - mu[1]) / (2.0 * HESS_STEP)
+    dmu_dq = modes @ dmu  # (nmode, 3), e / sqrt(u)
+    ir = IR_KM_MOL * np.sum(dmu_dq ** 2, axis=1)
+
+    freq = [_wavenumber(f) for f in ha["freq_wavenumber"]]
+    th = []
+    for temp, pres in THERMO_CONDITIONS:
+        rec = {"temperature_k": temp, "pressure_pa": pres}
+        rec.update(_thermo_values(thermo.thermo(mf, ha["freq_au"], temp, pres)))
+        th.append(rec)
+    print(f"HES {geom_name:9s} {method:16s} {basis:8s} E={e:.10f} max|g|={abs(g).max():.2e} "
+          f"freq={np.round(freq, 1)} IR={np.round(ir, 2)}", flush=True)
+    return {
+        "name": geom_name, "basis": basis, "method": method, "cartesian": False,
+        "atoms": syms,
+        "initial_coords_bohr": [list(xyz) for _, xyz in GEOMS[geom_name]],
+        "dft_grid": list(grid),
+        "coords_bohr": [[float(x) for x in row] for row in coords],
+        "masses_u": [float(x) for x in masses],
+        "e_tot": float(e),
+        "max_abs_gradient": float(abs(g).max()),
+        "hessian": [[float(x) for x in row] for row in hess],
+        "freq_wavenumber": [float(x) for x in freq],
+        "norm_mode_cartesian": [[float(x) for x in row] for row in modes],
+        "dipole_derivative_au": [[float(x) for x in row] for row in dmu],
+        "ir_displacement_bohr": HESS_STEP,
+        "ir_intensity_km_mol": [float(x) for x in ir],
+        "thermo": th,
+    }
+
+
+def hessians():
+    return [
+        hessian_entry("h2o_dist", "6-31g*", "rhf"),
+        hessian_entry("nh3", "6-31g*", "rhf"),
+        hessian_entry("hcn", "6-31g*", "rhf"),
+        hessian_entry("h2o_dist", "6-31g", "b3lypg"),
+        hessian_entry("nh3", "6-31g", "b3lypg"),
+        hessian_entry("h2o_dist", "6-31g", "camb3lyp"),
+    ]
+
+
+HESSIANS_NOTES = (
+    "Analytic Hessian (Eh/Bohr^2, 3N x 3N, row/column 3*atom+xyz), frequencies (cm^-1, imaginary as "
+    "negative), normal modes (Cartesian, = mass-weighted unit vector / sqrt(m)) and thermochemistry "
+    "(thermo.thermo, Eh and Eh/K; sym_number chosen by PySCF) from PySCF at the geomeTRIC-optimised "
+    "structure (same convergence as 'optimizations', fine grid for DFT). Masses are PySCF's "
+    "isotope-averaged defaults. ir_intensity_km_mol is NOT a PySCF result: PySCF's dipole moments "
+    "at +-ir_displacement_bohr Cartesian displacements are central-differenced and contracted with "
+    "PySCF's normal modes, then converted with docs/theory.typ eq:ir-intensity.")
+OUT_PATH = os.path.join(ROOT, "tests", "reference", "pyscf_reference.json")
+
+
+def main_hessians_only():
+    """Add/replace only 'hessians' in the existing JSON.  A full regeneration reproduces the older
+    sections only to ~1e-9 (SCF convergence), so they are kept exactly as committed."""
+    with open(OUT_PATH) as f:
+        out = json.load(f)
+    out["hessians_notes"] = HESSIANS_NOTES
+    out["hessians"] = hessians()
+    with open(OUT_PATH, "w") as f:
+        json.dump(out, f, indent=1)
+    print("wrote", OUT_PATH)
+
+
 def main():
     sp = []
     # --- RHF ---
@@ -199,12 +341,16 @@ def main():
         "notes": "All quantities in atomic units (Hartree, Bohr). Gradients are dE/dR in Hartree/Bohr.",
         "single_points": sp,
         "optimizations": opt,
+        "hessians_notes": HESSIANS_NOTES,
+        "hessians": hessians(),
     }
-    path = os.path.join(ROOT, "tests", "reference", "pyscf_reference.json")
-    with open(path, "w") as f:
+    with open(OUT_PATH, "w") as f:
         json.dump(out, f, indent=1)
-    print("wrote", path)
+    print("wrote", OUT_PATH)
 
 
 if __name__ == "__main__":
-    main()
+    if "--hessians-only" in sys.argv[1:]:
+        main_hessians_only()
+    else:
+        main()

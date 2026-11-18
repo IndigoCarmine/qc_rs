@@ -722,9 +722,18 @@ fn quartet_gradient_small<
                     hv[i * nab + a] = dot(&b.zv[a * NJ..(a + 1) * NJ], xrow);
                 }
             }
-            for (set, out) in [(1, (0, 0)), (2, (0, 1)), (3, (0, 2)), (4, (1, 0)), (5, (1, 1)), (6, (1, 2))] {
-                let e = &pa.e[set * NI1 * nab..(set + 1) * NI1 * nab];
-                gab[out.0][out.1] += pref * dot(e, hv);
+            // The six dot(Ẽ_set, H) (sets 1..=6 → A_x..B_z) in one pass, so that the six
+            // independent add chains overlap. Each accumulator is the same fold as `dot`
+            // (start -0.0, add e·h in index order), so the result is bit-identical.
+            let es: [&[f64]; 6] = std::array::from_fn(|k| &pa.e[(k + 1) * NI1 * nab..(k + 2) * NI1 * nab]);
+            let mut acc = [-0.0f64; 6];
+            for (x, &h) in hv.iter().enumerate() {
+                for (sum, e) in acc.iter_mut().zip(&es) {
+                    *sum += e[x] * h;
+                }
+            }
+            for (k, &sum) in acc.iter().enumerate() {
+                gab[k / 3][k % 3] += pref * sum;
             }
             // Q[ab][j], j < nj1, from the value coefficients (i < ni).
             let qv = &mut b.q[..nab * NJ1];
@@ -740,8 +749,16 @@ fn quartet_gradient_small<
                     }
                 }
             }
-            for (k, gck) in gc.iter_mut().enumerate() {
-                *gck += pref * dot(&b.zc[k * nab * NJ1..(k + 1) * nab * NJ1], qv);
+            // The three dot(Z_C[k], Q) in one pass, the same fold as `dot` (see above).
+            let zs: [&[f64]; 3] = std::array::from_fn(|k| &b.zc[k * nab * NJ1..(k + 1) * nab * NJ1]);
+            let mut acc = [-0.0f64; 3];
+            for (x, &qx) in qv.iter().enumerate() {
+                for (sum, z) in acc.iter_mut().zip(&zs) {
+                    *sum += z[x] * qx;
+                }
+            }
+            for (gck, &sum) in gc.iter_mut().zip(&acc) {
+                *gck += pref * sum;
             }
         }
     }

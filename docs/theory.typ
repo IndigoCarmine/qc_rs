@@ -870,7 +870,7 @@ $C_8$ は $C_6$ に比例するので、$e_(A B)$ は $C_6^(A B)$ の1次式で�
 $ (partial e_(A B)) / (partial r)
   = sum_n s_n C_n^(A B) n r^(n-1) / (r^n + (a_1 R_0 + a_2)^n)^2 quad ("BJ"), quad
   (partial e_(A B)) / (partial r)
-  = sum_n s_n C_n^(A B) f_n / r^(n+1) [n - 6 alpha_n t_n^(-alpha_n) f_n], quad t_n = r / (s_(r,n) R_0) quad ("ゼロ") $
+  = sum_n s_n C_n^(A B) f_n / r^(n+1) [n - 6 alpha_n t_n^(-alpha_n) f_n], quad t_n = r / (s_(r,n) R_0) quad ("ゼロ") $ <eq:d3-dedr>
 
 *配位数の微分。* @eq:d3-cn の各項を $g_(A B) = 1 slash (1 + e^u)$、$u = -k_1 (R_(A B)^c slash r - 1)$、$R_(A B)^c = k_2 (R_A^"cov" + R_B^"cov")$ とすると
 
@@ -890,4 +890,14 @@ $ (dif E_"disp") / (dif vb(R)_A) = sum_(B != A) [(partial e_(A B)) / (partial r)
 
 （連鎖律による導出で、文献の式ではない。）各対は $vb(R)_A - vb(R)_B$ だけに依るので並進不変性
 $sum_A dif E_"disp" slash dif vb(R)_A = vb(0)$ が厳密に成り立つ。検証は中心差分（@sec:grad の検証用の恒等式と同じ）で行う。
+
+== 全エネルギーと全勾配への加え方
+
+$E_"disp"$ は密度に依らないので、SCF（Fock 行列・収束）には入れず、収束後に足すだけである：
+
+$ E_"tot" = E_"SCF" + E_"disp", quad
+  (dif E_"tot") / (dif vb(R)_A) = (dif E_"SCF") / (dif vb(R)_A) + (dif E_"disp") / (dif vb(R)_A) $ <eq:d3-total>
+
+$E_"SCF"$ は @eq:e-rks（HF では @eq:e-rhf）、その勾配は @eq:grad、$E_"disp"$ の勾配は @eq:d3-grad。
+構造最適化（@sec:opt）はこの $E_"tot"$ とその勾配を最小化する。分散補正を指定しなければ $E_"tot" = E_"SCF"$ のままである。
 

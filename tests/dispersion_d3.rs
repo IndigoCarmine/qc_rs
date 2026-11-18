@@ -6,7 +6,7 @@
 //! checked against central differences of the energy.
 
 use qc_rs::dispersion::{D3Damping, D3Parameters, D3Variant, dispersion_energy, dispersion_energy_and_gradient};
-use qc_rs::{Molecule, QcError, Unit};
+use qc_rs::{Calculation, GridSettings, Molecule, OptimizerSettings, QcError, Unit};
 use serde_json::Value;
 use std::path::PathBuf;
 
@@ -223,6 +223,96 @@ fn every_test_molecule_has_a_reference() {
         }
     }
     assert!(n > 0, "no XYZ files in {}", dir.display());
+}
+
+/// B3LYP/STO-3G water dimer (geometry of d3_reference.json) with a coarse grid:
+/// small enough for an SCF gradient in the test suite.
+fn water_dimer_calculation() -> Calculation {
+    let mol = molecule(&reference()["molecules"]["water_dimer"]);
+    let grid = GridSettings { n_radial: 30, n_theta: 10 };
+    Calculation::new(&mol, "b3lyp", "sto-3g").unwrap().with_grid(grid)
+}
+
+/// theory.typ eq:d3-total through `Calculation`: the D3 energy and gradient are
+/// added to the SCF ones exactly, and without dispersion the results are the SCF
+/// ones (no dispersion fields, energy and gradient unchanged bit for bit).
+#[test]
+fn calculation_adds_dispersion_to_energy_and_gradient() {
+    let plain = water_dimer_calculation();
+    assert!(plain.dispersion().is_none());
+    for variant in [D3Variant::Bj, D3Variant::Zero] {
+        let params = D3Parameters::for_functional("b3lyp", variant).unwrap();
+        let calc = plain.clone().with_dispersion(variant).unwrap();
+        assert_eq!(calc.dispersion(), Some(&params));
+        let (e_ref, g_ref) = dispersion_energy_and_gradient(calc.molecule(), &params).unwrap();
+
+        let sp = calc.energy().unwrap();
+        assert_eq!(sp.dispersion_energy, Some(e_ref), "{variant:?}");
+        assert_eq!(sp.energy, sp.scf.energy + e_ref, "{variant:?}");
+
+        let gr = calc.gradient().unwrap();
+        assert_eq!(gr.dispersion_energy, Some(e_ref), "{variant:?}");
+        assert_eq!(gr.dispersion_gradient.as_ref(), Some(&g_ref), "{variant:?}");
+        assert_eq!(gr.energy, gr.scf.energy + e_ref, "{variant:?}");
+        let total = gr.components.total();
+        for (a, (g, (s, d))) in gr.gradient.iter().zip(total.iter().zip(&g_ref)).enumerate() {
+            for k in 0..3 {
+                assert_eq!(g[k], s[k] + d[k], "{variant:?} atom {a}");
+            }
+        }
+    }
+
+    // No dispersion: the fields are empty and energy/gradient are the SCF values.
+    let sp = plain.energy().unwrap();
+    assert_eq!(sp.dispersion_energy, None);
+    assert_eq!(sp.energy, sp.scf.energy);
+    let gr = plain.gradient().unwrap();
+    assert_eq!((gr.dispersion_energy, gr.dispersion_gradient.as_ref()), (None, None));
+    assert_eq!(gr.energy, gr.scf.energy);
+    assert_eq!(gr.gradient, gr.components.total());
+    // Removing the correction again gives the plain calculation.
+    let removed = plain.clone().with_dispersion(D3Variant::Bj).unwrap().with_dispersion_parameters(None);
+    assert_eq!(removed.energy().unwrap().energy, sp.energy);
+}
+
+/// The optimizer minimizes E_SCF + E_disp (eq:d3-total): its first evaluation is the
+/// D3 energy and gradient of the start geometry, and the returned gradient is the
+/// total gradient at the returned geometry.
+#[test]
+fn optimization_includes_dispersion() {
+    let calc = water_dimer_calculation().with_dispersion(D3Variant::Bj).unwrap();
+    let start = calc.gradient().unwrap();
+    let settings = OptimizerSettings { max_steps: 2, error_if_not_converged: false, ..OptimizerSettings::default() };
+    let opt = calc.optimize(&settings).unwrap();
+    assert_eq!(opt.history[0].energy, start.energy);
+    let max_g = start.gradient.iter().flatten().fold(0.0_f64, |m, v| m.max(v.abs()));
+    assert_eq!(opt.history[0].max_gradient, max_g);
+    // At the final geometry: same total as a fresh D3 gradient there. The SCF of the
+    // optimization started from the previous density, so allow its convergence error.
+    let end = calc.clone().with_molecule(&opt.molecule).gradient().unwrap();
+    assert!((opt.energy - end.energy).abs() < 1e-9, "E_opt {} vs {}", opt.energy, end.energy);
+    let worst = opt.gradient.iter().flatten().zip(end.gradient.iter().flatten()).fold(0.0_f64, |m, (a, b)| m.max((a - b).abs()));
+    assert!(worst < 1e-7, "max |g_opt - g| = {worst:e}");
+    // The D3 part is far larger than that tolerance, so the check above sees it.
+    let d3_max = end.dispersion_gradient.unwrap().iter().flatten().fold(0.0_f64, |m, v| m.max(v.abs()));
+    assert!(d3_max > 1e-5, "D3 gradient too small to test: {d3_max:e}");
+}
+
+/// HF and functionals without published D3 parameters are an error, unless the
+/// parameters are given explicitly.
+#[test]
+fn calculation_dispersion_needs_parameters() {
+    let mol = Molecule::from_symbols(&["H", "H"], &[[0.0; 3], [0.0, 0.0, 0.74]], Unit::Angstrom, 0).unwrap();
+    for method in ["hf", "blyp", "svwn5"] {
+        let calc = Calculation::new(&mol, method, "sto-3g").unwrap();
+        assert!(matches!(calc.with_dispersion(D3Variant::Bj), Err(QcError::InvalidInput(_))), "{method}");
+    }
+    let params = D3Parameters::new(D3Damping::Bj { s6: 1.0, a1: 0.4, s8: 1.0, a2: 5.0 }).unwrap();
+    let calc = Calculation::new(&mol, "hf", "sto-3g").unwrap().with_dispersion_parameters(Some(params));
+    let sp = calc.energy().unwrap();
+    let e_disp = dispersion_energy(&mol, &params).unwrap();
+    assert_eq!(sp.dispersion_energy, Some(e_disp));
+    assert_eq!(sp.energy, sp.scf.energy + e_disp);
 }
 
 #[test]

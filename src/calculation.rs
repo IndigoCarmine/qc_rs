@@ -1,8 +1,9 @@
 //! High-level driver: a molecule, a method ("hf" or a functional name) and a basis
-//! set name, with single-point energy, analytic gradient and geometry optimization.
+//! set name, with single-point energy, analytic gradient and geometry optimization,
+//! optionally with the DFT-D3 dispersion correction.
 //!
 //! ```no_run
-//! use qc_rs::{Calculation, Molecule, OptimizerSettings, Unit};
+//! use qc_rs::{Calculation, D3Variant, Molecule, OptimizerSettings, Unit};
 //! let mol = Molecule::from_symbols(
 //!     &["O", "H", "H"],
 //!     &[[0.0, 0.0, 0.12], [0.0, 0.76, -0.47], [0.0, -0.76, -0.47]],
@@ -14,11 +15,16 @@
 //! println!("dE/dR = {:?}", calc.gradient()?.gradient);
 //! let opt = calc.optimize(&OptimizerSettings::default())?;
 //! println!("E_opt = {} after {} steps", opt.energy, opt.steps);
+//! // B3LYP-D3(BJ): the dispersion energy is added to energy, gradient and optimization.
+//! let d3 = calc.with_dispersion(D3Variant::Bj)?;
+//! let e = d3.energy()?;
+//! println!("E = {} (E_disp = {:?})", e.energy, e.dispersion_energy);
 //! # Ok::<(), qc_rs::QcError>(())
 //! ```
 
 use crate::basis::{Basis, BasisOptions, BasisSetDefinition};
 use crate::dft::{XcIntegrator, XcOptions};
+use crate::dispersion::{D3Parameters, D3Variant, dispersion_energy, dispersion_energy_and_gradient};
 use crate::error::Result;
 use crate::functional::Functional;
 use crate::gradient::{GradientComponents, rks_gradient};
@@ -45,12 +51,14 @@ pub struct Calculation {
     basis_options: BasisOptions,
     grid: GridSettings,
     scf_options: ScfOptions,
+    dispersion: Option<D3Parameters>,
 }
 
 /// Result of [`Calculation::energy`].
 #[derive(Debug, Clone)]
 pub struct SinglePoint {
-    /// Total energy (Hartree).
+    /// Total energy (Hartree): `scf.energy` plus `dispersion_energy`, if any
+    /// (theory.typ eq:d3-total). UNCHECKED(Grimme2010)
     pub energy: f64,
     /// The converged SCF (components, orbitals, density).
     pub scf: ScfResult,
@@ -58,19 +66,28 @@ pub struct SinglePoint {
     pub electron_count: Option<f64>,
     /// Number of grid points (0 for HF).
     pub n_grid_points: usize,
+    /// DFT-D3 dispersion energy (Hartree, theory.typ eq:d3-e); `None` without a UNCHECKED(Grimme2010)
+    /// dispersion correction ([`Calculation::with_dispersion`]).
+    pub dispersion_energy: Option<f64>,
 }
 
 /// Result of [`Calculation::gradient`].
 #[derive(Debug, Clone)]
 pub struct GradientResult {
-    /// Total energy (Hartree).
+    /// Total energy (Hartree), including `dispersion_energy` if any.
     pub energy: f64,
-    /// dE/dR per atom (Hartree/Bohr).
+    /// dE/dR per atom (Hartree/Bohr): `components.total()` plus
+    /// `dispersion_gradient`, if any (theory.typ eq:d3-total).
     pub gradient: Vec<[f64; 3]>,
-    /// The individual terms of theory.typ eq:grad. UNCHECKED(Pulay1969)
+    /// The individual terms of theory.typ eq:grad (SCF part only). UNCHECKED(Pulay1969)
     pub components: GradientComponents,
     /// The SCF the gradient was computed from.
     pub scf: ScfResult,
+    /// DFT-D3 dispersion energy (Hartree); `None` without a dispersion correction.
+    pub dispersion_energy: Option<f64>,
+    /// DFT-D3 dispersion gradient per atom (Hartree/Bohr, theory.typ eq:d3-grad); DERIVED
+    /// `None` without a dispersion correction.
+    pub dispersion_gradient: Option<Vec<[f64; 3]>>,
 }
 
 /// Result of [`Calculation::optimize`].
@@ -78,7 +95,7 @@ pub struct GradientResult {
 pub struct GeometryOptimization {
     /// Final geometry.
     pub molecule: Molecule,
-    /// Energy at the final geometry.
+    /// Energy at the final geometry (including the dispersion energy, if any).
     pub energy: f64,
     /// Gradient at the final geometry (Hartree/Bohr).
     pub gradient: Vec<[f64; 3]>,
@@ -97,7 +114,7 @@ impl Calculation {
     /// `method` is "hf" or a functional name accepted by [`Functional::from_name`]
     /// (e.g. "b3lyp", "blyp", "svwn5", "cam-b3lyp"); `basis` is a built-in basis set name
     /// ("sto-3g", "6-31g", "6-31g*", "6-31g**"). Spherical d functions, the default DFT
-    /// grid of theory.typ section 8.4 and default SCF options.
+    /// grid of theory.typ section 8.4, default SCF options and no dispersion correction.
     pub fn new(molecule: &Molecule, method: &str, basis: &str) -> Result<Self> {
         let calc = Calculation {
             molecule: molecule.clone(),
@@ -106,6 +123,7 @@ impl Calculation {
             basis_options: BasisOptions::default(),
             grid: GridSettings::default(),
             scf_options: ScfOptions::default(),
+            dispersion: None,
         };
         calc.basis_for(molecule)?; // fail early on missing elements
         Ok(calc)
@@ -136,6 +154,33 @@ impl Calculation {
     pub fn with_integral_strategy(mut self, strategy: IntegralStrategy) -> Self {
         self.scf_options.integral_strategy = strategy;
         self
+    }
+
+    /// Adds the DFT-D3 two-body dispersion correction (theory.typ sec:d3) with the
+    /// published parameters of this calculation's functional
+    /// ([`D3Parameters::for_functional`]: B3LYP, B3LYP5 and CAM-B3LYP) to the energy,
+    /// the gradient and the geometry optimization (theory.typ eq:d3-total). Other
+    /// methods, including HF, are an error: give parameters explicitly with
+    /// [`Calculation::with_dispersion_parameters`]. Elements beyond Ar are an error.
+    pub fn with_dispersion(self, variant: D3Variant) -> Result<Self> {
+        let params = D3Parameters::for_functional(self.functional.name(), variant)?;
+        let calc = self.with_dispersion_parameters(Some(params));
+        dispersion_energy(&calc.molecule, &params)?; // fail early on elements beyond Ar
+        Ok(calc)
+    }
+
+    /// Adds a DFT-D3 correction with explicitly given parameters (see
+    /// [`D3Parameters::new`]) whatever the method; `None` removes the correction.
+    /// Unlike [`Calculation::with_dispersion`], unsupported elements are reported
+    /// only when the energy is computed.
+    pub fn with_dispersion_parameters(mut self, params: Option<D3Parameters>) -> Self {
+        self.dispersion = params;
+        self
+    }
+
+    /// The dispersion correction, if any.
+    pub fn dispersion(&self) -> Option<&D3Parameters> {
+        self.dispersion.as_ref()
     }
 
     /// Uses a different geometry with the same settings.
@@ -184,26 +229,39 @@ impl Calculation {
         Ok((scf, xc, grad))
     }
 
+    /// Dispersion energy and gradient at geometry `mol`, if a correction is set.
+    fn dispersion_at(&self, mol: &Molecule) -> Result<Option<(f64, Vec<[f64; 3]>)>> {
+        self.dispersion.as_ref().map(|p| dispersion_energy_and_gradient(mol, p)).transpose()
+    }
+
     /// Single-point energy.
     pub fn energy(&self) -> Result<SinglePoint> {
         let (scf, xc, _) = self.run(&self.molecule, &self.scf_options, false)?;
+        let e_disp = self.dispersion.as_ref().map(|p| dispersion_energy(&self.molecule, p)).transpose()?;
         Ok(SinglePoint {
-            energy: scf.energy,
+            // eq:d3-total. Without dispersion this is scf.energy unchanged.
+            energy: e_disp.map_or(scf.energy, |e| scf.energy + e),
             electron_count: xc.last_electron_count(),
             n_grid_points: xc.grid().len(),
             scf,
+            dispersion_energy: e_disp,
         })
     }
 
-    /// Energy and analytic gradient (theory.typ eq:grad).
+    /// Energy and analytic gradient (theory.typ eq:grad, plus eq:d3-grad with a
+    /// dispersion correction).
     pub fn gradient(&self) -> Result<GradientResult> {
         let (scf, _, grad) = self.run(&self.molecule, &self.gradient_scf_options(), true)?;
         let components = grad.expect("gradient requested");
-        Ok(GradientResult { energy: scf.energy, gradient: components.total(), components, scf })
+        let disp = self.dispersion_at(&self.molecule)?;
+        let (energy, gradient) = add_dispersion(scf.energy, components.total(), disp.as_ref());
+        let (dispersion_energy, dispersion_gradient) = disp.unzip();
+        Ok(GradientResult { energy, gradient, components, scf, dispersion_energy, dispersion_gradient })
     }
 
     /// Geometry optimization (theory.typ section 11) starting from this calculation's
-    /// molecule. The SCF at each new geometry starts from the previous density.
+    /// molecule, of the total energy including the dispersion correction if any
+    /// (eq:d3-total). The SCF at each new geometry starts from the previous density.
     pub fn optimize(&self, settings: &OptimizerSettings) -> Result<GeometryOptimization> {
         let base = self.gradient_scf_options();
         let mut last_density: Option<Matrix> = base.initial_density.clone();
@@ -212,8 +270,9 @@ impl Calculation {
             let opts = ScfOptions { initial_density: last_density.clone(), ..base.clone() };
             let (scf, _, grad) = self.run(&mol, &opts, true)?;
             last_density = Some(scf.density);
-            let g = grad.expect("gradient requested").total();
-            Ok((scf.energy, g.iter().flatten().copied().collect()))
+            let disp = self.dispersion_at(&mol)?;
+            let (e, g) = add_dispersion(scf.energy, grad.expect("gradient requested").total(), disp.as_ref());
+            Ok((e, g.iter().flatten().copied().collect()))
         })?;
         Ok(GeometryOptimization {
             molecule: self.molecule.with_coordinates(&res.coordinates)?,
@@ -224,5 +283,25 @@ impl Calculation {
             converged: res.converged,
             history: res.history,
         })
+    }
+}
+
+/// theory.typ eq:d3-total: SCF energy and gradient plus the dispersion part, if any.
+/// Without dispersion both are returned unchanged.
+fn add_dispersion(
+    e_scf: f64,
+    mut g: Vec<[f64; 3]>,
+    disp: Option<&(f64, Vec<[f64; 3]>)>,
+) -> (f64, Vec<[f64; 3]>) {
+    match disp {
+        None => (e_scf, g),
+        Some((e_disp, g_disp)) => {
+            for (a, b) in g.iter_mut().zip(g_disp) {
+                for (x, y) in a.iter_mut().zip(b) {
+                    *x += y;
+                }
+            }
+            (e_scf + e_disp, g)
+        }
     }
 }

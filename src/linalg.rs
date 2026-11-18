@@ -3,6 +3,13 @@
 use crate::error::{QcError, Result};
 use std::ops::{Add, Index, IndexMut, Mul, Sub};
 
+/// Multiply-adds below which `Matrix::matmul` runs serially (thread start-up would cost
+/// more than the product). Either path computes every row identically.
+const MATMUL_PARALLEL_MIN_WORK: usize = 1 << 18;
+
+/// Output rows handed to one rayon task in `Matrix::matmul`.
+const MATMUL_ROWS_PER_TASK: usize = 4;
+
 /// Dense row-major matrix of `f64`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Matrix {
@@ -71,11 +78,19 @@ impl Matrix {
     }
 
     /// Matrix product `self * other`.
+    ///
+    /// Each output row is accumulated by one task in the same order (k = 0, 1, …), so the
+    /// result does not depend on the number of threads or on whether the product runs in
+    /// parallel at all.
     pub fn matmul(&self, other: &Matrix) -> Matrix {
+        use rayon::prelude::*;
+
         assert_eq!(self.cols, other.rows, "matmul shape mismatch");
         let mut out = Matrix::zeros(self.rows, other.cols);
-        for i in 0..self.rows {
-            let orow = &mut out.data[i * other.cols..(i + 1) * other.cols];
+        if other.cols == 0 {
+            return out;
+        }
+        let row = |(i, orow): (usize, &mut [f64])| {
             for k in 0..self.cols {
                 let a = self.data[i * self.cols + k];
                 if a == 0.0 {
@@ -86,6 +101,12 @@ impl Matrix {
                     *o += a * b;
                 }
             }
+        };
+        let work = self.rows * self.cols * other.cols;
+        if work < MATMUL_PARALLEL_MIN_WORK {
+            out.data.chunks_mut(other.cols).enumerate().for_each(row);
+        } else {
+            out.data.par_chunks_mut(other.cols).with_min_len(MATMUL_ROWS_PER_TASK).enumerate().for_each(row);
         }
         out
     }
@@ -477,6 +498,53 @@ mod tests {
         let e = symmetric_eigen(&a).unwrap();
         assert!((e.values[0] + 1.0).abs() < 1e-15 && (e.values[1] - 1.0).abs() < 1e-15);
         assert!(symmetric_eigen(&Matrix::zeros(0, 0)).unwrap().values.is_empty());
+    }
+
+    /// Plain triple loop with the same summation order as `Matrix::matmul`.
+    fn matmul_reference(a: &Matrix, b: &Matrix) -> Matrix {
+        let mut out = Matrix::zeros(a.rows(), b.cols());
+        for i in 0..a.rows() {
+            for k in 0..a.cols() {
+                let x = a[(i, k)];
+                if x == 0.0 {
+                    continue;
+                }
+                for j in 0..b.cols() {
+                    out[(i, j)] += x * b[(k, j)];
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn matmul_bitwise_independent_of_threads() {
+        // Sizes below and above the parallel threshold, non-square, and with zeros.
+        let big = test_matrix(97);
+        let mut sparse = test_matrix(97);
+        for i in 0..97 {
+            sparse[(i, (i * 7) % 97)] = 0.0;
+        }
+        let rect = Matrix::from_fn(70, 130, |i, j| ((i * 131 + j * 17) % 23) as f64 / 7.0 - 1.5);
+        let rect_t = rect.transpose();
+        let cases = [
+            (test_matrix(5), test_matrix(5)),
+            (big.clone(), sparse.clone()),
+            (sparse, big),
+            (rect.clone(), rect_t.clone()),
+            (rect_t, rect),
+            (Matrix::zeros(3, 0), Matrix::zeros(0, 4)),
+            (Matrix::zeros(0, 3), Matrix::zeros(3, 0)),
+        ];
+        let one = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+        let four = rayon::ThreadPoolBuilder::new().num_threads(4).build().unwrap();
+        for (a, b) in &cases {
+            let r = matmul_reference(a, b);
+            let bits = |m: &Matrix| m.as_slice().iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+            assert_eq!(bits(&a.matmul(b)), bits(&r));
+            assert_eq!(bits(&one.install(|| a.matmul(b))), bits(&r));
+            assert_eq!(bits(&four.install(|| a.matmul(b))), bits(&r));
+        }
     }
 
     #[test]

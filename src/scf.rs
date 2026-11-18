@@ -5,7 +5,7 @@ use crate::basis::Basis;
 use crate::direct::{DirectBuildStatistics, DirectJk};
 use crate::error::{QcError, Result};
 use crate::integrals::{EriTensor, ExchangeKernel, core_hamiltonian, overlap};
-use crate::linalg::{Matrix, solve, symmetric_eigen};
+use crate::linalg::{Matrix, SymmetricEigen, solve, symmetric_eigen};
 use crate::molecule::{Atom, Molecule};
 use std::collections::VecDeque;
 
@@ -350,17 +350,55 @@ impl ScfSystem<'_> {
 }
 
 /// P = 2 Σ_i^occ C_μi C_νi. theory.typ eq:density
+///
+/// The lower triangle is built in parallel over rows (each element summed over i in
+/// order by one task, so the result does not depend on the number of threads) and then
+/// mirrored.
 fn density(c: &Matrix, nocc: usize) -> Matrix {
+    use rayon::prelude::*;
+
     let n = c.rows();
     let mut p = Matrix::zeros(n, n);
+    if n == 0 {
+        return p;
+    }
+    let (cd, ldc) = (c.as_slice(), c.cols());
+    p.as_mut_slice().par_chunks_mut(n).enumerate().for_each(|(mu, row)| {
+        let cmu = &cd[mu * ldc..mu * ldc + nocc];
+        for (nu, v) in row[..=mu].iter_mut().enumerate() {
+            let cnu = &cd[nu * ldc..nu * ldc + nocc];
+            *v = cmu.iter().zip(cnu).map(|(a, b)| a * b).sum::<f64>() * 2.0;
+        }
+    });
     for mu in 0..n {
-        for nu in 0..=mu {
-            let v: f64 = (0..nocc).map(|i| c[(mu, i)] * c[(nu, i)]).sum::<f64>() * 2.0;
-            p[(mu, nu)] = v;
-            p[(nu, mu)] = v;
+        for nu in 0..mu {
+            p[(nu, mu)] = p[(mu, nu)];
         }
     }
     p
+}
+
+/// X = U s^{-1/2} Uᵀ from the eigen-decomposition of S (theory.typ eq:orth), built in
+/// parallel over rows; each element is summed over k in order by one task.
+fn symmetric_orthogonalizer(se: &SymmetricEigen) -> Matrix {
+    use rayon::prelude::*;
+
+    let u = &se.vectors;
+    let n = u.rows();
+    let mut x = Matrix::zeros(n, n);
+    if n == 0 {
+        return x;
+    }
+    let sqrt_s: Vec<f64> = se.values.iter().map(|s| s.sqrt()).collect();
+    let ud = u.as_slice();
+    x.as_mut_slice().par_chunks_mut(n).enumerate().for_each(|(i, row)| {
+        let ui = &ud[i * n..(i + 1) * n];
+        for (j, v) in row.iter_mut().enumerate() {
+            let uj = &ud[j * n..(j + 1) * n];
+            *v = ui.iter().zip(uj).zip(&sqrt_s).map(|((a, b), r)| a * b / r).sum();
+        }
+    });
+    x
 }
 
 /// Occupation numbers of a spherically averaged atom (theory.typ eq:sad-occ): orbitals UNCHECKED(VanLenthe2006)
@@ -476,8 +514,7 @@ pub fn run_scf(
     if smin < options.linear_dependence_threshold {
         return Err(QcError::LinearDependence(smin));
     }
-    let u = &se.vectors;
-    let x = Matrix::from_fn(n, n, |i, j| (0..n).map(|k| u[(i, k)] * u[(j, k)] / se.values[k].sqrt()).sum());
+    let x = symmetric_orthogonalizer(&se);
     let kernel = xc.exchange_kernel();
     let two = match resolve_strategy(options, n, kernel) {
         IntegralStrategy::Direct => TwoElectron::Direct(Box::new(DirectState {
@@ -714,5 +751,53 @@ mod tests {
         let core = run_scf(&mol, &basis, &mut HartreeFock, &core_opts).unwrap();
         assert!((sad.energy - core.energy).abs() < 1e-9, "{} vs {}", sad.energy, core.energy);
         assert!(sad.iterations <= core.iterations, "{} vs {} iterations", sad.iterations, core.iterations);
+    }
+
+    fn bits(m: &Matrix) -> Vec<u64> {
+        m.as_slice().iter().map(|x| x.to_bits()).collect()
+    }
+
+    #[test]
+    fn density_and_orthogonalizer_match_serial_formulas_bitwise() {
+        let n = 61;
+        let a = Matrix::from_fn(n, n, |i, j| ((i * 37 + j * 11) % 29) as f64 / 13.0 - 1.0);
+        let sym = &a + &a.transpose();
+        let se = symmetric_eigen(&(&sym.matmul(&sym) + &Matrix::identity(n))).unwrap();
+        let u = &se.vectors;
+        // The plain serial formulas (theory.typ eq:orth, eq:density).
+        let x_ref = Matrix::from_fn(n, n, |i, j| (0..n).map(|k| u[(i, k)] * u[(j, k)] / se.values[k].sqrt()).sum());
+        let nocc = 17;
+        let p_ref = Matrix::from_fn(n, n, |mu, nu| {
+            let (r, c) = if nu <= mu { (mu, nu) } else { (nu, mu) };
+            (0..nocc).map(|i| a[(r, i)] * a[(c, i)]).sum::<f64>() * 2.0
+        });
+        let one = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+        let four = rayon::ThreadPoolBuilder::new().num_threads(4).build().unwrap();
+        for x in [symmetric_orthogonalizer(&se), one.install(|| symmetric_orthogonalizer(&se)), four.install(|| symmetric_orthogonalizer(&se))] {
+            assert_eq!(bits(&x), bits(&x_ref));
+        }
+        for p in [density(&a, nocc), one.install(|| density(&a, nocc)), four.install(|| density(&a, nocc))] {
+            assert_eq!(bits(&p), bits(&p_ref));
+        }
+        assert_eq!(density(&Matrix::zeros(0, 0), 0).rows(), 0);
+    }
+
+    #[test]
+    fn scf_energy_bitwise_independent_of_threads() {
+        let mol = Molecule::from_symbols(
+            &["O", "H", "H"],
+            &[[0.0, 0.0, 0.117], [0.0, 0.757, -0.469], [0.0, -0.757, -0.469]],
+            Unit::Angstrom,
+            0,
+        )
+        .unwrap();
+        let basis = Basis::from_name(&mol, "6-31g*").unwrap();
+        let run = || run_scf(&mol, &basis, &mut HartreeFock, &ScfOptions::default()).unwrap();
+        let one = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap().install(run);
+        let four = rayon::ThreadPoolBuilder::new().num_threads(4).build().unwrap().install(run);
+        let default = run();
+        assert_eq!(one.energy.to_bits(), default.energy.to_bits());
+        assert_eq!(four.energy.to_bits(), default.energy.to_bits());
+        assert_eq!(one.iterations, default.iterations);
     }
 }

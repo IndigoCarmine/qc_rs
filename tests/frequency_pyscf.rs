@@ -2,7 +2,8 @@
 //! eq:reduced-mass) fed with the PySCF Hessians of tests/reference/pyscf_reference.json
 //! ("hessians"), so that only the analysis is tested, not the SCF; and thermochemistry
 //! (eq:thermo-trans … eq:thermo-total) fed with PySCF's wavenumbers. Then
-//! `Calculation::frequencies` end to end (our own SCF, gradient and numerical Hessian).
+//! `Calculation::frequencies` end to end (our own SCF, gradient and numerical Hessian),
+//! including the dipole derivatives and IR intensities (eq:ir-intensity).
 
 use qc_rs::{
     Calculation, DEFAULT_HESSIAN_STEP, FrequencySettings, GridSettings, Matrix, Molecule, ThermoSettings, Unit, harmonic_analysis,
@@ -114,6 +115,47 @@ fn frequencies_and_modes_match_pyscf() {
     assert!(saw_linear);
 }
 
+/// Sums of `values` over the degenerate groups of `freqs` (tolerance 1e-2 cm⁻¹, as in
+/// frequencies_and_modes_match_pyscf). IR intensities of degenerate modes depend on the
+/// arbitrary basis of the subspace, their sum does not (theory.typ eq:ir-intensity).
+fn group_sums(freqs: &[f64], values: &[f64]) -> Vec<f64> {
+    degenerate_groups(freqs, 1e-2).iter().map(|g| g.iter().map(|&k| values[k]).sum()).collect()
+}
+
+/// The reference "ir_intensity_km_mol" is NOT a PySCF result (this PySCF has no IR
+/// module): PySCF's dipole moments at ±h displacements, central-differenced
+/// ("dipole_derivative_au"), contracted with PySCF's normal modes and converted with
+/// *our* formula, theory.typ eq:ir-intensity. Fed with PySCF's Hessian and PySCF's dipole
+/// derivatives, our harmonic analysis and `ir_intensities` must reproduce it: this checks
+/// the contraction with our normal modes and the km/mol factor against the generator's
+/// independent evaluation of the same formula, not the definition of the formula.
+///
+/// Compared per degenerate group (sum). Measured worst relative deviation 1.0e-13 (the
+/// same Hessian gives the same mode subspaces, so only rounding remains); limit 1e-10
+/// relative plus 1e-12 km/mol for near-zero intensities.
+#[test]
+fn ir_intensities_from_pyscf_dipoles() {
+    let reference = load_reference();
+    let mut worst: f64 = 0.0;
+    for entry in reference["hessians"].as_array().unwrap() {
+        let name = label(entry);
+        let mol = molecule(entry);
+        let n = 3 * mol.atoms().len();
+        let h = rows(&entry["hessian"]);
+        let r = harmonic_analysis(&mol, &Matrix::from_fn(n, n, |i, j| h[i][j]), None).unwrap();
+        let dmu = rows(&entry["dipole_derivative_au"]);
+        let a = r.ir_intensities(&Matrix::from_fn(n, 3, |j, alpha| dmu[j][alpha])).unwrap();
+        let freq_ref = f64s(&entry["freq_wavenumber"]);
+        let (ours, theirs) = (group_sums(&freq_ref, &a), group_sums(&freq_ref, &f64s(&entry["ir_intensity_km_mol"])));
+        for (x, y) in ours.iter().zip(&theirs) {
+            let dev = (x - y).abs();
+            worst = worst.max(dev / y.abs().max(1e-3));
+            assert!(dev <= 1e-10 * y.abs() + 1e-12,"{name}: IR {x} vs {y} km/mol (|Δ| {dev:e})");
+        }
+    }
+    println!("IR from PySCF dipoles: worst relative deviation {worst:.2e}");
+}
+
 /// Absolute and relative difference of `a` from the reference `b`.
 fn diff(a: f64, b: f64) -> (f64, f64) {
     ((a - b).abs(), (a - b).abs() / b.abs())
@@ -206,6 +248,10 @@ struct EndToEnd {
     hessian: f64,
     frequency: f64,
     thermo: f64,
+    /// max |∂μ_α/∂x_j − PySCF| (e), component by component.
+    dipole_derivative: f64,
+    /// max over degenerate groups of |ΣA_k − ΣA_k(ref)| / max(ΣA_k(ref), 1 km/mol).
+    ir: f64,
 }
 
 /// `Calculation::frequencies` (numerical Hessian from our own SCF and analytic gradient,
@@ -276,8 +322,29 @@ fn end_to_end(method: &str, step: f64) -> Vec<(String, EndToEnd)> {
         let direct =
             thermochemistry(&mol, None, &r.analysis.frequencies_cm1, r.hessian.energy, &settings.thermo).unwrap();
         assert_eq!(r.thermo, direct, "{name}");
-        println!("{name} h = {step}: Hessian {d_hess:.2e} Eh/Bohr², wavenumber {d_freq:.3} cm⁻¹, ZPE/H/G {d_thermo:.2e} Eh");
-        out.push((name, EndToEnd { hessian: d_hess, frequency: d_freq, thermo: d_thermo }));
+
+        // Dipole derivatives (same ±h as the reference, which uses PySCF's dipole moments)
+        // component by component: they do not depend on the normal modes.
+        let dmu_ref = rows(&entry["dipole_derivative_au"]);
+        assert_eq!(entry["ir_displacement_bohr"].as_f64(), Some(DEFAULT_HESSIAN_STEP), "{name}");
+        assert_eq!((r.hessian.dipole_derivatives.rows(), r.hessian.dipole_derivatives.cols()), (n, 3));
+        let d_dmu = (0..n).flat_map(|j| (0..3).map(move |a| (j, a))).fold(0.0_f64, |m, (j, a)| {
+            m.max((r.hessian.dipole_derivatives[(j, a)] - dmu_ref[j][a]).abs())
+        });
+        // IR intensities: ours (own dipoles and modes) against the reference (PySCF's
+        // dipoles and modes, our formula eq:ir-intensity), summed per degenerate group.
+        assert_eq!(r.ir_intensities, r.analysis.ir_intensities(&r.hessian.dipole_derivatives).unwrap(), "{name}");
+        let ours = group_sums(&freq_ref, &r.ir_intensities);
+        let theirs = group_sums(&freq_ref, &f64s(&entry["ir_intensity_km_mol"]));
+        let d_ir = ours.iter().zip(&theirs).fold(0.0_f64, |m, (a, b)| m.max((a - b).abs() / b.abs().max(1.0)));
+        println!(
+            "{name} h = {step}: Hessian {d_hess:.2e} Eh/Bohr², wavenumber {d_freq:.3} cm⁻¹, ZPE/H/G {d_thermo:.2e} Eh, \
+             dμ/dx {d_dmu:.2e} e, IR rel {d_ir:.2e} (ours {ours:.3?} km/mol)"
+        );
+        out.push((
+            name,
+            EndToEnd { hessian: d_hess, frequency: d_freq, thermo: d_thermo, dipole_derivative: d_dmu, ir: d_ir },
+        ));
     }
     assert!(!out.is_empty(), "no {method} entries");
     out
@@ -292,11 +359,13 @@ fn end_to_end(method: &str, step: f64) -> Vec<(String, EndToEnd)> {
 /// 4 per halving of h (HCN 7.6e-5, 1.9e-5, 4.7e-6; H2O 9.0e-6, 2.3e-6, 5.7e-7 for
 /// h = 5e-3, 2.5e-3, 1.25e-3), so it is that truncation error, not a wrong gradient.
 /// Limits ≈ 2–3 × the measured worst: Hessian 1e-5 E_h/Bohr², 0.2 cm⁻¹, 1e-6 E_h.
+/// Dipole derivatives and IR intensities: see check_ir.
 #[test]
 fn frequencies_end_to_end_rhf() {
     for (name, d) in end_to_end("rhf", DEFAULT_HESSIAN_STEP) {
         assert!(d.frequency <= 0.2, "{name}: wavenumber deviation {} cm⁻¹", d.frequency);
         assert!(d.thermo <= 1e-6, "{name}: ZPE/H/G deviation {:e} E_h", d.thermo);
+        check_ir(&name, &d);
     }
     for (name, d) in end_to_end("rhf", 1.25e-3) {
         assert!(d.hessian <= 1e-5, "{name}: Hessian deviation {:e} E_h/Bohr²", d.hessian);
@@ -313,7 +382,27 @@ fn check_dft_end_to_end(method: &str) {
         assert!(d.hessian <= 4e-5, "{name}: Hessian deviation {:e} E_h/Bohr²", d.hessian);
         assert!(d.frequency <= 0.2, "{name}: wavenumber deviation {} cm⁻¹", d.frequency);
         assert!(d.thermo <= 1e-6, "{name}: ZPE/H/G deviation {:e} E_h", d.thermo);
+        check_ir(&name, &d);
     }
+}
+
+/// Dipole derivatives and IR intensities of `frequencies()` at the default h (the same h
+/// as the reference) against the reference built from PySCF's dipole moments and normal
+/// modes with our formula eq:ir-intensity (see ir_intensities_from_pyscf_dipoles).
+///
+/// ∂μ/∂x is compared component by component (it does not depend on the modes). Both
+/// sides use the same ±h, so the O(h²) truncation error of the central difference cancels
+/// and only the dipoles differ: worst measured 5.5e-8 e (NH3 B3LYP; RHF 2.5e-8, the SCF
+/// convergence; DFT adds the grid). Limit 2e-7 e.
+///
+/// IR intensities, summed per degenerate group, relative to max(A_ref, 1 km/mol): worst
+/// measured 4.6e-5 (NH3 RHF; DFT 2.7e-5). This comes mainly from our normal modes, which
+/// follow from our numerical Hessian (O(h²) error, see above) rather than PySCF's analytic
+/// one; with h = 1.25e-3 it falls to ≤ 1.6e-5 although ∂μ/∂x then differs by its own O(h²)
+/// truncation error (≤ 4.5e-6 e). Limit 2e-4.
+fn check_ir(name: &str, d: &EndToEnd) {
+    assert!(d.dipole_derivative <= 2e-7, "{name}: dipole derivative deviation {:e} e", d.dipole_derivative);
+    assert!(d.ir <= 2e-4, "{name}: IR intensity relative deviation {:e}", d.ir);
 }
 
 /// B3LYP (VWN-RPA, PySCF "b3lypg")/6-31G: H2O, NH3.

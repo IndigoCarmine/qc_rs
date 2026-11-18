@@ -1,7 +1,7 @@
 # qc_rs
 
 Gauss 基底による閉殻 Hartree–Fock（RHF）と Kohn–Sham DFT（RKS）の Rust 実装です。
-1点エネルギー・解析的エネルギー勾配・構造最適化・調和振動数と熱化学ができ、分散補正 DFT-D3（BJ・ゼロ減衰）を加えられます。依存クレートは `rayon`（並列化）だけです。
+1点エネルギー・解析的エネルギー勾配・構造最適化・調和振動数・IR 強度と熱化学ができ、分散補正 DFT-D3（BJ・ゼロ減衰）を加えられます。依存クレートは `rayon`（並列化）だけです。
 数式はすべて `docs/theory.typ`（理論仕様書）に従い、コード中のコメントは仕様書の式ラベル（`eq:grad` など）を参照しています。
 
 純 Rust で書かれており、C/Fortran のライブラリやシステムの BLAS を必要としません。
@@ -48,7 +48,11 @@ Windows・Linux・macOS のどれでも `cargo build` だけでビルドでき�
   - 熱化学は理想気体・剛体回転子・調和振動子の近似（零点エネルギー、U、H、S、G、C_v、C_p。1分子あたり、Eh と Eh/K）で、
     電子エネルギーは基準構造の全エネルギー（分散補正を含む）です。
   - 制限：**回転の対称数は自動で判定しません**（`ThermoSettings::symmetry_number`、既定 1。H2O は 2、NH3 は 3 などを自分で与える）。
-    低振動数の補正（qRRHO など）はなく、電子状態の縮重度は 1 に固定です。IR 強度はまだ計算できません。
+    低振動数の補正（qRRHO など）はなく、電子状態の縮重度は 1 に固定です。
+  - **IR 強度**（`FrequencyResult::ir_intensities`、km/mol、振動数と同じ順）：Hessian と同じ変位の SCF ごとに双極子モーメントを計算して中心差分し
+    （`HessianResult::dipole_derivatives`、余分な SCF は要りません）、基準振動で縮約した二重調和近似の積分吸収係数です（`docs/theory.typ` の `eq:ir-intensity`）。
+    縮退した振動では個々の値が基底の選び方に依るので、縮退群の和だけに意味があります。荷電分子でも双極子の原点に依りません。
+    ラマン強度や非調和補正はありません。
 
 ## 使い方
 
@@ -102,6 +106,7 @@ fn main() -> qc_rs::Result<()> {
     let freq = calc.with_molecule(&opt.molecule).frequencies(&settings)?;
     assert!(freq.max_abs_gradient < 1e-4); // 停留点であることを確かめる
     println!("振動数 (cm⁻¹, 虚数は負) = {:?}", freq.analysis.frequencies_cm1);
+    println!("IR 強度 (km/mol) = {:?}", freq.ir_intensities);
     let t = &freq.thermo;
     println!("ZPE = {:.6}, H = {:.6}, G = {:.6} Eh", t.zero_point_energy, t.enthalpy, t.gibbs_energy);
     assert_eq!(t.n_excluded_modes, 0); // 虚数振動数なし
@@ -109,9 +114,9 @@ fn main() -> qc_rs::Result<()> {
 }
 ```
 
-`FrequencyResult` には Hessian（`hessian`、`HessianResult`）、基準振動と換算質量（`analysis`、`HarmonicAnalysis`）、
-熱化学の内訳（`thermo`、`Thermochemistry`）が入ります。Hessian だけなら `Calculation::hessian`、
-自分で用意した Hessian や振動数からは `harmonic_analysis`、`thermochemistry` を直接呼べます。
+`FrequencyResult` には Hessian と双極子の微分（`hessian`、`HessianResult`）、基準振動と換算質量（`analysis`、`HarmonicAnalysis`）、
+IR 強度（`ir_intensities`）、熱化学の内訳（`thermo`、`Thermochemistry`）が入ります。Hessian だけなら `Calculation::hessian`、
+自分で用意した Hessian や振動数からは `harmonic_analysis`、`thermochemistry`、`HarmonicAnalysis::ir_intensities` を直接呼べます。
 
 DFT の格子は `.with_grid(GridSettings::fine())`（既定は 75 × 18 × 36 点/原子）、デカルト d は `.with_cartesian_d(true)`、
 SCF の設定は `.with_scf_options(...)` で変えられます。SCF の初期値は原子密度の重ね合わせです
@@ -248,11 +253,17 @@ RHF/6-31G と B3LYP/6-31G のエネルギーと勾配を PySCF の参照値と�
 | 数値 Hessian 要素（同、細かい格子） | B3LYP 2件・CAM-B3LYP 1件 | 1.9e-5 Eh/Bohr²（NH3 B3LYP） |
 | 調和振動数（`frequencies`） | 上の6件 | 0.062 cm⁻¹（RHF）、0.057 cm⁻¹（DFT） |
 | ZPE・H・G（`frequencies`） | 同上、298.15 K と 500 K | 3.3e-7 Eh（HCN RHF）、2.4e-7 Eh（NH3 B3LYP） |
+| 双極子のデカルト微分（`frequencies`、同じ h） | 上の6件 | 5.5e-8 e（NH3 B3LYP。RHF は 2.5e-8 以下） |
+| IR 強度（`frequencies`、縮退群の和の相対差） | 上の6件 | 4.6e-5（NH3 RHF。DFT は 2.7e-5 以下） |
+| IR 強度（PySCF の Hessian と双極子の微分から） | 上の6件 | 相対 1e-13（換算と縮約の検査） |
 
 `frequencies` の比較（`tests/frequency_pyscf.rs`）は PySCF が最適化した構造で、こちらの SCF・解析的勾配・数値 Hessian を通したものです。
 PySCF の Hessian は解析的なので、数値 Hessian の差は主に中心差分の打ち切り誤差（h² に比例。h を半分にすると差が 1/4 になる）で、
 DFT ではそれに格子の違いと、PySCF の Hessian が格子の応答を含まないことによる 1e-6 Eh/Bohr² 程度の差が加わります。
 熱化学は PySCF の k_B（CODATA 2014 相当）にそろえた温度で比べています（`docs/theory.typ` の熱化学の節）。
+IR 強度の参照値は PySCF の双極子と基準振動にこちらの式を当てたもの（上の「参照値」の説明）なので、この比較は双極子の微分と基準振動を確かめ、
+式と換算係数の定義そのものは確かめません。双極子の微分は参照値と同じ h で差分しているので打ち切り誤差は打ち消し合い、
+IR 強度の差は主に、数値 Hessian（打ち切り誤差 h²）から求めた基準振動と PySCF の解析的 Hessian の基準振動の違いによります。
 
 PySCF に依存しない検査として、エネルギーの中心差分（h = 1e-3 Bohr）との差は RHF/6-31G\* で 1.5e-7
 （Richardson 外挿で 3e-10）、B3LYP/6-31G の細かい格子で 1.5e-7（同 2.5e-9）、CAM-B3LYP/6-31G の細かい格子で 1.5e-7（同 1.6e-9）、既定の格子で 1.3e-6

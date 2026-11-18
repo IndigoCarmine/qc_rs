@@ -64,5 +64,5 @@ pub use linalg::Matrix;
 pub use molecule::{Atom, Molecule, Unit};
 pub use properties::dipole_moment;
 pub use thermo::{ThermoContribution, ThermoSettings, Thermochemistry, thermochemistry};
-pub use vibration::{HarmonicAnalysis, harmonic_analysis, standard_atomic_mass};
+pub use vibration::{HarmonicAnalysis, IR_INTENSITY_KM_MOL_PER_E2_U, harmonic_analysis, standard_atomic_mass};
 pub use scf::{EnergyComponents, ExchangeCorrelation, HartreeFock, InitialGuess, IntegralStrategy, ScfOptions, ScfResult, XcTerm, run_rhf, run_scf};

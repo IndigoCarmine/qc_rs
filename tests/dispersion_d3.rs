@@ -3,10 +3,11 @@
 //! with no distance cutoff and no three-body term), for B3LYP and CAM-B3LYP with BJ
 //! and zero damping, on every molecule of the reference file (all elements H–Ar and
 //! tests/molecules/*.xyz). The analytic gradient (theory.typ eq:d3-grad) is also
-//! checked against central differences of the energy.
+//! checked against central differences of the energy, and the central-difference
+//! Hessian of that gradient (eq:hess-fd) against the Hessian of dftd3.
 
 use qc_rs::dispersion::{D3Damping, D3Parameters, D3Variant, dispersion_energy, dispersion_energy_and_gradient};
-use qc_rs::{Calculation, GridSettings, Molecule, OptimizerSettings, QcError, Unit};
+use qc_rs::{Calculation, GridSettings, Molecule, OptimizerSettings, QcError, Unit, central_difference_hessian};
 use serde_json::Value;
 use std::path::PathBuf;
 
@@ -175,6 +176,72 @@ fn gradients_match_central_differences() {
             assert!(worst < 1e-8, "{label} {name}: max |analytic - numeric| = {worst:e}");
         }
     }
+}
+
+/// D3 Hessian by central differences of the analytic gradient (theory.typ eq:hess-fd,
+/// eq:hess-sym, as used by `Calculation::hessian`) against the Hessian of dftd3
+/// (`DispersionModel.get_hessian`), on every reference molecule that has one.
+///
+/// Step h = 1e-4 Bohr (D3 is an analytic function with no SCF noise, so the step can
+/// be far below DEFAULT_HESSIAN_STEP). Error budget per element:
+/// * truncation h²/6 · ∂³g_i/∂x_j³ ≈ 1.7e-9 × g''' — of order 1e-11 here, as the
+///   asymmetry δ_asym of the unsymmetrised Hessian (also O(h²)) shows (≤ 9e-12);
+/// * rounding ~ 1e-16 · |g| / h ≈ 1e-15 (|g| < 1e-3);
+/// * data precision, the dominant term: the float32 C6, r4r2, CN and r0ab enter each
+///   pair term of the Hessian with the relative error of the energy (REL_TOL_BJ,
+///   REL_TOL_ZERO; for zero damping amplified by α_n through R0^AB), so the absolute
+///   error is that relative error times the pair Hessian elements that add up to an
+///   element. The largest element of the reference Hessians is 4.4e-4 Hartree/Bohr²
+///   (MgH2, zero damping), so PAIR_HESSIAN_SCALE = 1e-3 as for the gradient.
+///
+/// Tolerances: BJ 2e-10, zero 1.5e-9 Hartree/Bohr². Observed: at most 4.3e-11 (BJ, BH3) and 3.6e-10
+/// (zero, water dimer).
+#[test]
+fn hessians_match_dftd3() {
+    const PAIR_HESSIAN_SCALE: f64 = 1e-3;
+    let r = reference();
+    let h = 1e-4;
+    let mut n = 0;
+    let mut failures = Vec::new();
+    for (name, entry) in r["molecules"].as_object().unwrap() {
+        let mol = molecule(entry);
+        let n3 = 3 * mol.atoms().len();
+        for (label, func, variant) in CASES {
+            let Some(h_ref) = entry["results"][label].get("hessian") else { continue };
+            let h_ref: Vec<Vec<f64>> = h_ref
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row.as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect())
+                .collect();
+            assert_eq!(h_ref.len(), n3, "{label} {name}: Hessian rows");
+            let params = D3Parameters::for_functional(func, variant).unwrap();
+            let tol = rel_tol(variant) * PAIR_HESSIAN_SCALE;
+            let fd = central_difference_hessian(&mol.coordinates(), h, |x| {
+                let (_, g) = dispersion_energy_and_gradient(&mol.with_coordinates(x)?, &params)?;
+                Ok(g.iter().flatten().copied().collect())
+            })
+            .unwrap();
+            let mut worst = 0.0_f64;
+            let mut scale = 0.0_f64;
+            for (i, row) in h_ref.iter().enumerate() {
+                assert_eq!(row.len(), n3, "{label} {name}: Hessian columns");
+                for (j, &v) in row.iter().enumerate() {
+                    let d = (fd.hessian[(i, j)] - v).abs();
+                    // A NaN element must fail too.
+                    worst = if d.is_nan() || worst.is_nan() { f64::NAN } else { worst.max(d) };
+                    scale = scale.max(v.abs());
+                }
+            }
+            println!("{label:16} {name:14} max |H - H_ref| = {worst:.2e}  max |H_ref| = {scale:.2e}  asym {:.1e}", fd.max_asymmetry);
+            if worst.is_nan() || worst > tol {
+                failures.push(format!("{label} {name}: max |H - H_ref| = {worst:.3e} > {tol:e} Hartree/Bohr^2"));
+            }
+            n += 1;
+        }
+    }
+    assert!(n >= 4 * 18, "only {n} Hessian references");
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 /// Translational invariance (theory.typ, below eq:d3-grad): Σ_A dE/dR_A = 0.

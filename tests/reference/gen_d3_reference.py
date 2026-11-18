@@ -1,4 +1,4 @@
-"""Generate DFT-D3 reference values (energy and gradient) with dftd3 (simple-dftd3).
+"""Generate DFT-D3 reference values (energy, gradient, Hessian) with dftd3 (simple-dftd3).
 
 Usage (from the repository root):
     .venv/Scripts/pip install dftd3==1.7.0                       # Windows
@@ -24,7 +24,10 @@ as a black box through its documented Python API (dftd3.interface).
 
 Molecules: the water dimer, every tests/molecules/*.xyz, and small molecules
 that together contain every element H-Ar.  Units in the JSON: Hartree, Bohr
-(gradients are dE/dR in Hartree/Bohr).
+(gradients are dE/dR in Hartree/Bohr).  The 3N x 3N Hessian
+(DispersionModel.get_hessian, Hartree/Bohr^2, index 3*atom + xyz) is stored only
+for the built-in molecules (GEOMS_ANG, at most 6 atoms), not for the larger
+tests/molecules/*.xyz, to keep the JSON small.
 """
 import glob
 import json
@@ -122,7 +125,7 @@ def damping(kind, p):
     return ZeroDampingParam(**p)
 
 
-def compute(atoms, coords):
+def compute(atoms, coords, with_hessian):
     numbers = np.array([Z[s] for s in atoms])
     pos = np.array(coords)
     dmax = max((float(np.linalg.norm(pos[i] - pos[j])) for i in range(len(atoms)) for j in range(i)), default=0.0)
@@ -135,13 +138,16 @@ def compute(atoms, coords):
         r = model.get_dispersion(damping(kind, p), grad=True)
         results[label] = {"energy": float(r["energy"]),
                           "gradient": [[float(x) for x in row] for row in r["gradient"]]}
+        if with_hessian:
+            hess = np.asarray(model.get_hessian(damping(kind, p))["hessian"]).reshape(3 * len(atoms), 3 * len(atoms))
+            results[label]["hessian"] = [[float(x) for x in row] for row in hess]
     return dmax, results
 
 
 def main():
     out_mols = {}
     for name, (atoms, coords, source) in molecules().items():
-        dmax, results = compute(atoms, coords)
+        dmax, results = compute(atoms, coords, with_hessian=name in GEOMS_ANG)
         out_mols[name] = {"source": source, "atoms": atoms, "coords_bohr": coords,
                           "max_interatomic_distance_bohr": dmax, "results": results}
         e = results["b3lyp-d3bj"]["energy"]
@@ -149,7 +155,8 @@ def main():
     out = {
         "generator": "dftd3 " + dftd3.__version__ + " (simple-dftd3 Python API, dftd3.interface)",
         "dftd3_version": dftd3.__version__,
-        "units": {"energy": "Hartree", "length": "Bohr", "gradient": "Hartree/Bohr (dE/dR)"},
+        "units": {"energy": "Hartree", "length": "Bohr", "gradient": "Hartree/Bohr (dE/dR)",
+                  "hessian": "Hartree/Bohr^2 (d2E/dR dR), row/column index 3*atom + xyz"},
         "angstrom_to_bohr": ANG,
         "cutoff": {
             "how": "DispersionModel.set_realspace_cutoff(disp2, disp3, cn)",

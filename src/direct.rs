@@ -364,30 +364,62 @@ const fn sign_table<const NTJ: usize>(lcd: usize) -> [f64; NTJ] {
     out
 }
 
-/// [`quartet`] without a range-separated kernel for l_ab = `LAB`, l_cd = `LCD` <=
-/// SMALL_LAB (`NTI`, `NTJ` their numbers of Hermite indices): the same sums in the
-/// same order, with the R recurrence unrolled for ltot = LAB + LCD, the R index and
-/// sign tables built at compile time, and fixed-length Hermite rows.
-fn quartet_small<const LAB: usize, const LCD: usize, const NTI: usize, const NTJ: usize>(
+/// [`accumulate_ket`] with rows of length `NTI`.
+#[inline(always)]
+fn accumulate_ket_small<const NTI: usize, const NTJ: usize>(
+    cd: &DirectPair,
+    ecd: &[f64],
+    rm: &[[f64; NTI]; NTJ],
+    x: &mut [f64],
+) {
+    for (c, xr) in x.as_chunks_mut::<NTI>().0.iter_mut().enumerate() {
+        for k in cd.off[c]..cd.off[c + 1] {
+            let e = ecd[k];
+            for (xv, &r) in xr.iter_mut().zip(&rm[cd.idx[k]]) {
+                *xv += e * r;
+            }
+        }
+    }
+}
+
+/// [`quartet`] for l_ab = `LAB`, l_cd = `LCD` <= SMALL_LAB (`NTI`, `NTJ` their numbers
+/// of Hermite indices), without (`ERF` false) or with (`ERF` true, `erf` Some) a
+/// range-separated kernel: the same sums in the same order as [`quartet_general`],
+/// with the R recurrences unrolled for ltot = LAB + LCD, the R index and sign tables
+/// built at compile time, and fixed-length Hermite rows.
+fn quartet_small<const LAB: usize, const LCD: usize, const NTI: usize, const NTJ: usize, const ERF: bool>(
     ab: &DirectPair,
     cd: &DirectPair,
+    erf: Option<ErfKernel>,
     prim_cut: f64,
     s: &mut Scratch,
 ) {
     let ridx: [[usize; NTI]; NTJ] = const { ridx_table::<NTI, NTJ>(LAB, LCD) };
     let sign: [f64; NTJ] = const { sign_table::<NTJ>(LCD) };
     debug_assert!(ab.lab == LAB && cd.lab == LCD);
+    debug_assert_eq!(ERF, erf.is_some());
+    // A compile-time None without the kernel, so that its code is dropped.
+    let erf = if ERF { erf } else { None };
     let n = ab.ncomp * cd.ncomp;
     s.x.resize(NTI * cd.ncomp, 0.0);
     s.v.clear();
     s.v.resize(n, 0.0);
+    if erf.is_some() {
+        s.x_x.resize(NTI * cd.ncomp, 0.0);
+        s.v_x.clear();
+        s.v_x.resize(n, 0.0);
+    }
     let mut rm = [[0.0; NTI]; NTJ];
+    let mut rm_x = [[0.0; NTI]; NTJ];
     let qc_max = cd.prims.first().map_or(0.0, |x| x.q);
     for pa in &ab.prims {
         if pa.q * qc_max < prim_cut {
             break;
         }
         s.x.fill(0.0);
+        if erf.is_some() {
+            s.x_x.fill(0.0);
+        }
         for pc in &cd.prims {
             if pa.q * pc.q < prim_cut {
                 break;
@@ -403,17 +435,24 @@ fn quartet_small<const LAB: usize, const LCD: usize, const NTI: usize, const NTJ
                     *d = f * rc[i];
                 }
             }
-            // accumulate_ket with rows of length NTI.
-            for (c, xr) in s.x.as_chunks_mut::<NTI>().0.iter_mut().enumerate() {
-                for k in cd.off[c]..cd.off[c + 1] {
-                    let e = pc.val[k];
-                    for (xv, &r) in xr.iter_mut().zip(&rm[cd.idx[k]]) {
-                        *xv += e * r;
+            accumulate_ket_small(cd, &pc.val, &rm, &mut s.x);
+            if let Some((omega, ka, kb)) = erf {
+                // theory.typ eq:eri-erf: exponent α' and factor √(ω²/(α+ω²)).
+                let (a_eff, scale) = erf_attenuation(alpha, omega);
+                let re = hermite_r_small(LAB + LCD, a_eff, pq, &mut s.small_r_erf);
+                let (fc, fe) = (ka * pref, kb * pref * scale);
+                for ((row, ix), &sg) in rm_x.iter_mut().zip(&ridx).zip(&sign) {
+                    for (d, &i) in row.iter_mut().zip(ix) {
+                        *d = sg * (fc * rc[i] + fe * re[i]);
                     }
                 }
+                accumulate_ket_small(cd, &pc.val, &rm_x, &mut s.x_x);
             }
         }
         contract_bra(ab, cd.ncomp, &pa.val, &s.x, &mut s.v);
+        if erf.is_some() {
+            contract_bra(ab, cd.ncomp, &pa.val, &s.x_x, &mut s.v_x);
+        }
     }
 }
 
@@ -423,6 +462,8 @@ struct Scratch {
     r: HermiteRFast,
     r_erf: HermiteRFast,
     small_r: SmallR,
+    /// R table of the erf kernel in [`quartet_small`].
+    small_r_erf: SmallR,
     /// Index into the R table of every (ket tuv, bra tuv), ket-major.
     ridx: Vec<usize>,
     /// pref (-1)^{τ+ν+φ} R_{t+τ,u+ν,v+φ}, ket-major `[jt][it]`; Coulomb kernel.
@@ -483,21 +524,27 @@ type ErfKernel = (f64, f64, f64);
 /// first (x), so that the bra coefficients are applied once per bra primitive pair.
 /// Primitive quartets with Q_a Q_c < `prim_cut` (primitive Schwarz factors) are skipped.
 fn quartet(ab: &DirectPair, cd: &DirectPair, erf: Option<ErfKernel>, prim_cut: f64, s: &mut Scratch) {
-    if erf.is_none() {
-        match (ab.lab, cd.lab) {
-            (0, 0) => return quartet_small::<0, 0, 1, 1>(ab, cd, prim_cut, s),
-            (0, 1) => return quartet_small::<0, 1, 1, 4>(ab, cd, prim_cut, s),
-            (0, 2) => return quartet_small::<0, 2, 1, 10>(ab, cd, prim_cut, s),
-            (1, 0) => return quartet_small::<1, 0, 4, 1>(ab, cd, prim_cut, s),
-            (1, 1) => return quartet_small::<1, 1, 4, 4>(ab, cd, prim_cut, s),
-            (1, 2) => return quartet_small::<1, 2, 4, 10>(ab, cd, prim_cut, s),
-            (2, 0) => return quartet_small::<2, 0, 10, 1>(ab, cd, prim_cut, s),
-            (2, 1) => return quartet_small::<2, 1, 10, 4>(ab, cd, prim_cut, s),
-            (2, 2) => return quartet_small::<2, 2, 10, 10>(ab, cd, prim_cut, s),
-            _ => {}
-        }
+    match (ab.lab, cd.lab, erf.is_some()) {
+        (0, 0, false) => quartet_small::<0, 0, 1, 1, false>(ab, cd, erf, prim_cut, s),
+        (0, 1, false) => quartet_small::<0, 1, 1, 4, false>(ab, cd, erf, prim_cut, s),
+        (0, 2, false) => quartet_small::<0, 2, 1, 10, false>(ab, cd, erf, prim_cut, s),
+        (1, 0, false) => quartet_small::<1, 0, 4, 1, false>(ab, cd, erf, prim_cut, s),
+        (1, 1, false) => quartet_small::<1, 1, 4, 4, false>(ab, cd, erf, prim_cut, s),
+        (1, 2, false) => quartet_small::<1, 2, 4, 10, false>(ab, cd, erf, prim_cut, s),
+        (2, 0, false) => quartet_small::<2, 0, 10, 1, false>(ab, cd, erf, prim_cut, s),
+        (2, 1, false) => quartet_small::<2, 1, 10, 4, false>(ab, cd, erf, prim_cut, s),
+        (2, 2, false) => quartet_small::<2, 2, 10, 10, false>(ab, cd, erf, prim_cut, s),
+        (0, 0, true) => quartet_small::<0, 0, 1, 1, true>(ab, cd, erf, prim_cut, s),
+        (0, 1, true) => quartet_small::<0, 1, 1, 4, true>(ab, cd, erf, prim_cut, s),
+        (0, 2, true) => quartet_small::<0, 2, 1, 10, true>(ab, cd, erf, prim_cut, s),
+        (1, 0, true) => quartet_small::<1, 0, 4, 1, true>(ab, cd, erf, prim_cut, s),
+        (1, 1, true) => quartet_small::<1, 1, 4, 4, true>(ab, cd, erf, prim_cut, s),
+        (1, 2, true) => quartet_small::<1, 2, 4, 10, true>(ab, cd, erf, prim_cut, s),
+        (2, 0, true) => quartet_small::<2, 0, 10, 1, true>(ab, cd, erf, prim_cut, s),
+        (2, 1, true) => quartet_small::<2, 1, 10, 4, true>(ab, cd, erf, prim_cut, s),
+        (2, 2, true) => quartet_small::<2, 2, 10, 10, true>(ab, cd, erf, prim_cut, s),
+        _ => quartet_general(ab, cd, erf, prim_cut, s),
     }
-    quartet_general(ab, cd, erf, prim_cut, s);
 }
 
 /// [`quartet`] for any angular momenta and kernel.
@@ -1001,12 +1048,14 @@ mod tests {
     #[test]
     fn small_kernel_matches_general() {
         // The unrolled s/p kernel performs the same operations as the general one, so
-        // every shell quartet agrees exactly, with and without primitive screening.
+        // every shell quartet agrees exactly, with and without primitive screening, for
+        // the Coulomb kernel alone and with a range-separated exchange kernel.
         let b = Basis::from_name(&molecule(), "6-31g").unwrap();
         let pairs: Vec<DirectPair> =
             (0..b.shells().len()).flat_map(|a| (0..=a).map(move |c| (a, c))).map(|(a, c)| DirectPair::new(&b, a, c)).collect();
         let (mut s1, mut s2) = (Scratch::default(), Scratch::default());
         let mut classes = std::collections::BTreeSet::new();
+        let erf = Some((0.33, 0.19, 0.46));
         for ab in &pairs {
             for cd in &pairs {
                 assert!(ab.lab <= SMALL_LAB && cd.lab <= SMALL_LAB);
@@ -1015,6 +1064,10 @@ mod tests {
                     quartet(ab, cd, None, cut, &mut s1);
                     quartet_general(ab, cd, None, cut, &mut s2);
                     assert_eq!(s1.v, s2.v);
+                    quartet(ab, cd, erf, cut, &mut s1);
+                    quartet_general(ab, cd, erf, cut, &mut s2);
+                    assert_eq!(s1.v, s2.v);
+                    assert_eq!(s1.v_x, s2.v_x);
                 }
             }
         }

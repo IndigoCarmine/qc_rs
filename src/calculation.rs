@@ -25,10 +25,11 @@
 use crate::basis::{Basis, BasisOptions, BasisSetDefinition};
 use crate::dft::{XcIntegrator, XcOptions};
 use crate::dispersion::{D3Parameters, D3Variant, dispersion_energy, dispersion_energy_and_gradient};
-use crate::error::Result;
+use crate::error::{QcError, Result};
 use crate::functional::Functional;
 use crate::gradient::{GradientComponents, rks_gradient};
 use crate::grid::{GridSettings, MolecularGrid};
+use crate::hessian::central_difference_hessian;
 use crate::linalg::Matrix;
 use crate::molecule::Molecule;
 use crate::optimize::{OptimizationStep, OptimizerSettings, bfgs_minimize};
@@ -88,6 +89,31 @@ pub struct GradientResult {
     /// DFT-D3 dispersion gradient per atom (Hartree/Bohr, theory.typ eq:d3-grad). DERIVED
     /// `None` without a dispersion correction.
     pub dispersion_gradient: Option<Vec<[f64; 3]>>,
+}
+
+/// Result of [`Calculation::hessian`].
+#[derive(Debug, Clone)]
+pub struct HessianResult {
+    /// Total energy at the reference geometry (Hartree), as [`GradientResult::energy`].
+    pub energy: f64,
+    /// Total gradient at the reference geometry (Hartree/Bohr), as
+    /// [`GradientResult::gradient`]. Frequencies are meaningful only where it is ~0.
+    pub gradient: Vec<[f64; 3]>,
+    /// Symmetrised Cartesian Hessian of the total energy (Hartree/Bohr²), 3N × 3N,
+    /// coordinates ordered atom by atom (x, y, z) like [`Molecule::coordinates`]
+    /// (theory.typ eq:hess-fd, eq:hess-sym). DERIVED
+    pub hessian: Matrix,
+    /// δ_asym = max |H_ij − H_ji| before symmetrisation (Hartree/Bohr²): a measure of
+    /// the numerical error of the Hessian.
+    pub max_asymmetry: f64,
+    /// Displacement h (Bohr).
+    pub step: f64,
+    /// Number of displaced SCF + gradient evaluations (6N), not counting the reference.
+    pub n_gradient_evaluations: usize,
+    /// SCF iterations summed over the displaced evaluations.
+    pub displaced_scf_iterations: usize,
+    /// The SCF at the reference geometry.
+    pub scf: ScfResult,
 }
 
 /// Result of [`Calculation::optimize`].
@@ -258,6 +284,44 @@ impl Calculation {
         let (energy, gradient) = add_dispersion(scf.energy, components.total(), disp.as_ref());
         let (dispersion_energy, dispersion_gradient) = disp.unzip();
         Ok(GradientResult { energy, gradient, components, scf, dispersion_energy, dispersion_gradient })
+    }
+
+    /// Cartesian Hessian of the total energy (including the dispersion correction, if
+    /// any) by central differences of the analytic gradient with displacement `step`
+    /// in Bohr (theory.typ eq:hess-fd, [`crate::hessian::DEFAULT_HESSIAN_STEP`] is the recommended
+    /// value), symmetrised by eq:hess-sym. DERIVED
+    ///
+    /// The reference point is computed like [`Calculation::gradient`]; each of the 6N
+    /// displaced SCFs starts from the reference density and converges to
+    /// [`GRADIENT_SCF_ERROR_TOLERANCE`] (or the user's tighter tolerance). The
+    /// displacements run one after another.
+    pub fn hessian(&self, step: f64) -> Result<HessianResult> {
+        if !(step.is_finite() && step > 0.0) {
+            // Checked here too so that no SCF runs for an invalid step.
+            return Err(QcError::InvalidInput(format!("Hessian displacement must be finite and positive, got {step}")));
+        }
+        let reference = self.gradient()?;
+        let base = ScfOptions { initial_density: Some(reference.scf.density.clone()), ..self.gradient_scf_options() };
+        let mut displaced_scf_iterations = 0;
+        let fd = central_difference_hessian(&self.molecule.coordinates(), step, |x| {
+            let mol = self.molecule.with_coordinates(x)?;
+            // The same total gradient as gradient(): SCF part plus eq:d3-grad.
+            let disp = self.dispersion_at(&mol)?;
+            let (scf, _, grad) = self.run(&mol, &base, true)?;
+            displaced_scf_iterations += scf.iterations;
+            let (_, g) = add_dispersion(scf.energy, grad.expect("gradient requested").total(), disp.as_ref());
+            Ok(g.iter().flatten().copied().collect())
+        })?;
+        Ok(HessianResult {
+            energy: reference.energy,
+            gradient: reference.gradient,
+            hessian: fd.hessian,
+            max_asymmetry: fd.max_asymmetry,
+            step,
+            n_gradient_evaluations: fd.n_gradient_evaluations,
+            displaced_scf_iterations,
+            scf: reference.scf,
+        })
     }
 
     /// Geometry optimization (theory.typ section 11) starting from this calculation's

@@ -128,6 +128,30 @@ fn dispersion_is_included() {
     assert!(h_disp.max_abs() > 1e-6, "D3 Hessian too small to test: {:e}", h_disp.max_abs());
 }
 
+/// Dipole derivatives (theory.typ eq:ir-intensity): translating the whole molecule by
+/// δ changes μ by q δ (eq:dipole with the origin fixed), so Σ_A ∂μ_α/∂x_Aβ = q δ_αβ,
+/// for neutral LiH (q = 0) and for the cation HeH⁺ (q = 1). Each sum is a sum of central
+/// differences of a smooth function, so it holds up to O(h²) and SCF convergence.
+#[test]
+fn dipole_derivatives_sum_to_the_charge() {
+    let lih = Molecule::from_symbols(&["Li", "H"], &[[0.0, 0.0, 0.0], [0.05, -0.03, 1.6]], Unit::Angstrom, 0).unwrap();
+    let heh = Molecule::from_symbols(&["He", "H"], &[[0.0, 0.0, 0.0], [0.05, -0.03, 0.78]], Unit::Angstrom, 1).unwrap();
+    for (mol, q) in [(lih, 0.0), (heh, 1.0)] {
+        let res = Calculation::new(&mol, "hf", "sto-3g").unwrap().hessian(DEFAULT_HESSIAN_STEP).unwrap();
+        let d = &res.dipole_derivatives;
+        assert_eq!((d.rows(), d.cols()), (6, 3));
+        let mut worst: f64 = 0.0;
+        for alpha in 0..3 {
+            for beta in 0..3 {
+                let s: f64 = (0..2).map(|a| d[(3 * a + beta, alpha)]).sum();
+                worst = worst.max((s - if alpha == beta { q } else { 0.0 }).abs());
+            }
+        }
+        assert!(worst < 1e-6, "q = {q}: max |Σ_A ∂μ/∂x_A − q δ| = {worst:e}");
+        assert!(d.max_abs() > 0.1, "q = {q}: dipole derivatives too small to test");
+    }
+}
+
 #[test]
 fn invalid_step_is_an_error() {
     let calc = Calculation::new(&h2(), "hf", "sto-3g").unwrap();

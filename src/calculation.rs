@@ -34,6 +34,7 @@ use crate::hessian::{DEFAULT_HESSIAN_STEP, central_difference_hessian};
 use crate::linalg::Matrix;
 use crate::molecule::Molecule;
 use crate::optimize::{OptimizationStep, OptimizerSettings, bfgs_minimize};
+use crate::properties::dipole_moment;
 use crate::scf::{IntegralStrategy, ScfOptions, ScfResult, run_scf};
 use crate::thermo::{ThermoSettings, Thermochemistry, check_settings as check_thermo_settings, thermochemistry};
 use crate::vibration::{HarmonicAnalysis, harmonic_analysis, resolve_masses};
@@ -117,6 +118,11 @@ pub struct HessianResult {
     pub displaced_scf_iterations: usize,
     /// The SCF at the reference geometry.
     pub scf: ScfResult,
+    /// Cartesian dipole derivatives ∂μ_α/∂x_j (e, i.e. e a₀ per a₀), 3N × 3 with row j
+    /// in the order of `hessian`: central differences of the dipole moment
+    /// ([`crate::dipole_moment`], theory.typ eq:dipole) of the same displaced SCFs.
+    /// Independent of the dipole origin, also for a charged molecule. theory.typ eq:ir-intensity DERIVED
+    pub dipole_derivatives: Matrix,
 }
 
 /// Settings of [`Calculation::frequencies`].
@@ -148,6 +154,11 @@ pub struct FrequencyResult {
     /// Harmonic wavenumbers (cm⁻¹, ascending, imaginary as negative), normal modes and
     /// reduced masses (theory.typ eq:mass-weight … eq:reduced-mass).
     pub analysis: HarmonicAnalysis,
+    /// IR intensities A_k (km/mol, theory.typ eq:ir-intensity) in the order of
+    /// `analysis.frequencies_cm1`, from `hessian.dipole_derivatives`
+    /// ([`HarmonicAnalysis::ir_intensities`]). Within a degenerate set of modes only the
+    /// sum is meaningful.
+    pub ir_intensities: Vec<f64>,
     /// RRHO thermochemistry (theory.typ eq:thermo-total) with E_el = the total energy
     /// at the reference geometry, including the dispersion energy if any.
     pub thermo: Thermochemistry,
@@ -334,7 +345,8 @@ impl Calculation {
     /// The reference point is computed like [`Calculation::gradient`]; each of the 6N
     /// displaced SCFs starts from the reference density and converges to
     /// [`GRADIENT_SCF_ERROR_TOLERANCE`] (or the user's tighter tolerance). The
-    /// displacements run one after another.
+    /// displacements run one after another. The dipole moment of each displaced SCF
+    /// gives [`HessianResult::dipole_derivatives`] without extra SCFs.
     pub fn hessian(&self, step: f64) -> Result<HessianResult> {
         if !(step.is_finite() && step > 0.0) {
             // Checked here too so that no SCF runs for an invalid step.
@@ -343,15 +355,24 @@ impl Calculation {
         let reference = self.gradient()?;
         let base = ScfOptions { initial_density: Some(reference.scf.density.clone()), ..self.gradient_scf_options() };
         let mut displaced_scf_iterations = 0;
+        // Dipole moments of the displaced SCFs, in the call order of
+        // central_difference_hessian: +h then −h for each coordinate in turn.
+        let mut dipoles: Vec<[f64; 3]> = Vec::with_capacity(6 * self.molecule.atoms().len());
         let fd = central_difference_hessian(&self.molecule.coordinates(), step, |x| {
             let mol = self.molecule.with_coordinates(x)?;
             // The same total gradient as gradient(): SCF part plus eq:d3-grad.
             let disp = self.dispersion_at(&mol)?;
             let (scf, _, grad) = self.run(&mol, &base, true)?;
             displaced_scf_iterations += scf.iterations;
+            dipoles.push(dipole_moment(&mol, &self.basis_for(&mol)?, &scf.density));
             let (_, g) = add_dispersion(scf.energy, grad.expect("gradient requested").total(), disp.as_ref());
             Ok(g.iter().flatten().copied().collect())
         })?;
+        // eq:ir-intensity: ∂μ_α/∂x_j = (μ_α(x + h e_j) − μ_α(x − h e_j)) / 2h.
+        let n = 3 * self.molecule.atoms().len();
+        assert_eq!(dipoles.len(), 2 * n, "central_difference_hessian evaluates 2n displaced points");
+        let dipole_derivatives =
+            Matrix::from_fn(n, 3, |j, alpha| (dipoles[2 * j][alpha] - dipoles[2 * j + 1][alpha]) / (2.0 * step));
         Ok(HessianResult {
             energy: reference.energy,
             gradient: reference.gradient,
@@ -361,6 +382,7 @@ impl Calculation {
             n_gradient_evaluations: fd.n_gradient_evaluations,
             displaced_scf_iterations,
             scf: reference.scf,
+            dipole_derivatives,
         })
     }
 
@@ -382,10 +404,11 @@ impl Calculation {
         let hessian = self.hessian(settings.step)?;
         let masses = settings.masses.as_deref();
         let analysis = harmonic_analysis(&self.molecule, &hessian.hessian, masses)?;
+        let ir_intensities = analysis.ir_intensities(&hessian.dipole_derivatives)?;
         let thermo =
             thermochemistry(&self.molecule, masses, &analysis.frequencies_cm1, hessian.energy, &settings.thermo)?;
         let max_abs_gradient = hessian.gradient.iter().flatten().fold(0.0_f64, |m, g| m.max(g.abs()));
-        Ok(FrequencyResult { hessian, analysis, thermo, max_abs_gradient })
+        Ok(FrequencyResult { hessian, analysis, ir_intensities, thermo, max_abs_gradient })
     }
 
     /// Geometry optimization (theory.typ section 11) starting from this calculation's

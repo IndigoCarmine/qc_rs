@@ -38,6 +38,12 @@ pub(crate) const HARTREE_IN_WAVENUMBER: f64 = 219474.6313632;
 /// m_e / m_u (CODATA 2018). theory.typ eq:freq UNCHECKED(CODATA2018)
 pub(crate) const ELECTRON_MASS_IN_U: f64 = 5.48579909065e-4;
 
+/// N_A e² / (12 ε₀ c² m_u) × 10⁻³: the IR intensity in km/mol of |∂μ/∂Q_k|² = 1 e²/u,
+/// from the CODATA 2018 N_A, e, ε₀, c and m_u (≈ 974.8801). theory.typ eq:ir-intensity UNCHECKED(Wilson1955)
+pub const IR_INTENSITY_KM_MOL_PER_E2_U: f64 =
+    6.02214076e23 * 1.602176634e-19 * 1.602176634e-19 / (12.0 * 8.8541878128e-12 * 299792458.0 * 299792458.0 * 1.66053906660e-27)
+        * 1e-3;
+
 /// A rotation a is kept only if I_a > ROTATION_THRESHOLD · I_3 (theory.typ
 /// eq:tr-vectors; a numerical convention, not a literature value). DERIVED
 const ROTATION_THRESHOLD: f64 = 1e-6;
@@ -161,6 +167,32 @@ impl HarmonicAnalysis {
     pub fn cartesian_displacements(&self) -> Matrix {
         let n = self.normal_modes.rows();
         Matrix::from_fn(n, self.normal_modes.cols(), |i, k| self.normal_modes[(i, k)] / self.masses[i / 3].sqrt())
+    }
+
+    /// IR intensities A_k (km/mol) of the modes, in the order of `frequencies_cm1`, from
+    /// the Cartesian dipole derivatives `dipole_derivatives` (3 N × 3, row j = ∂μ/∂x_j
+    /// in e, i.e. e a₀ per a₀, as [`crate::HessianResult::dipole_derivatives`]):
+    /// ∂μ/∂Q_k = Σ_j ∂μ/∂x_j d_k,j with d_k of [`Self::cartesian_displacements`], and
+    /// A_k = [`IR_INTENSITY_KM_MOL_PER_E2_U`] · |∂μ/∂Q_k|². theory.typ eq:ir-intensity UNCHECKED(Wilson1955)
+    ///
+    /// Within a degenerate set of modes the individual A_k depend on the (arbitrary)
+    /// basis of the subspace; their sum does not.
+    pub fn ir_intensities(&self, dipole_derivatives: &Matrix) -> Result<Vec<f64>> {
+        let n = self.normal_modes.rows();
+        if dipole_derivatives.rows() != n || dipole_derivatives.cols() != 3 {
+            return Err(QcError::InvalidInput(format!(
+                "dipole derivatives are {}×{}, expected {n}×3",
+                dipole_derivatives.rows(),
+                dipole_derivatives.cols()
+            )));
+        }
+        let d = self.cartesian_displacements();
+        Ok((0..d.cols())
+            .map(|k| {
+                let dmu_dq = [0, 1, 2].map(|alpha| (0..n).map(|j| dipole_derivatives[(j, alpha)] * d[(j, k)]).sum::<f64>());
+                IR_INTENSITY_KM_MOL_PER_E2_U * dmu_dq.iter().map(|x| x * x).sum::<f64>()
+            })
+            .collect())
     }
 }
 
@@ -423,6 +455,50 @@ mod tests {
         for (a, b) in base.frequencies_cm1.iter().zip(&r.frequencies_cm1) {
             assert!((a - b).abs() < 1e-8, "{a} vs {b}");
         }
+    }
+
+    /// The km/mol factor of theory.typ eq:ir-intensity against the values computed by hand
+    /// there: 974.8801 per e²/u and 42.2561 per (D/Å)²/u (1 D/Å = 0.2081943 e).
+    #[test]
+    fn ir_conversion_factor() {
+        assert!((IR_INTENSITY_KM_MOL_PER_E2_U - 974.8801).abs() < 1e-4, "{IR_INTENSITY_KM_MOL_PER_E2_U}");
+        // 1 D = 1e-21 / c C m; per Å it is 1e-11 / c C, in units of e.
+        let debye_per_angstrom_in_e: f64 = 1e-11 / 299792458.0 / 1.602176634e-19;
+        let per_d2_a2_u = IR_INTENSITY_KM_MOL_PER_E2_U * debye_per_angstrom_in_e.powi(2);
+        assert!((per_d2_a2_u - 42.2561).abs() < 1e-4, "{per_d2_a2_u}");
+    }
+
+    /// Diatomic with fixed charges q_A along the bond (∂μ_α/∂x_Aβ = q_A δ_αβ): the stretch
+    /// d = s (−m_2, m_1) ê_z with s = 1/√(m_1 m_2 M) gives ∂μ/∂Q = (q_2 m_1 − q_1 m_2) s ê_z,
+    /// so A = C (q_2 m_1 − q_1 m_2)² / (m_1 m_2 M); for q_2 = −q_1 = q this is C q²/μ.
+    /// The formula holds for a net charge too (q_1 + q_2 ≠ 0). Adding c m_A / M to each
+    /// q_A adds c × (centre-of-mass displacement) to μ, which a mode does not move, so it
+    /// leaves A unchanged (theory.typ eq:ir-intensity).
+    #[test]
+    fn ir_intensity_of_charged_diatomic() {
+        let mol = Molecule::from_symbols(&["H", "Cl"], &[[0.1, -0.2, 0.3], [0.1, -0.2, 2.7]], Unit::Bohr, 0).unwrap();
+        let mut h = Matrix::zeros(6, 6);
+        for (i, j, v) in [(2, 2, 0.4), (5, 5, 0.4), (2, 5, -0.4), (5, 2, -0.4)] {
+            h[(i, j)] = v;
+        }
+        let r = harmonic_analysis(&mol, &h, None).unwrap();
+        assert_eq!(r.frequencies_cm1.len(), 1);
+        let (m1, m2) = (r.masses[0], r.masses[1]);
+        let charges = |q1: f64, q2: f64| Matrix::from_fn(6, 3, |j, alpha| if j % 3 == alpha { [q1, q2][j / 3] } else { 0.0 });
+        let expected = |q1: f64, q2: f64| {
+            IR_INTENSITY_KM_MOL_PER_E2_U * (q2 * m1 - q1 * m2).powi(2) / (m1 * m2 * (m1 + m2))
+        };
+        let a = r.ir_intensities(&charges(-0.3, 0.3)).unwrap();
+        assert!((a[0] - expected(-0.3, 0.3)).abs() < 1e-10 * a[0], "{a:?}");
+        let mu = m1 * m2 / (m1 + m2);
+        assert!((a[0] - IR_INTENSITY_KM_MOL_PER_E2_U * 0.09 / mu).abs() < 1e-10 * a[0]);
+        let charged = r.ir_intensities(&charges(0.4, 1.0)).unwrap();
+        assert!((charged[0] - expected(0.4, 1.0)).abs() < 1e-10 * charged[0], "{charged:?}");
+        let total = m1 + m2;
+        let shifted = r.ir_intensities(&charges(-0.3 + 0.7 * m1 / total, 0.3 + 0.7 * m2 / total)).unwrap();
+        assert!((shifted[0] - a[0]).abs() < 1e-10 * a[0], "{shifted:?} vs {a:?}");
+        assert!(matches!(r.ir_intensities(&Matrix::zeros(6, 2)), Err(QcError::InvalidInput(_))));
+        assert!(matches!(r.ir_intensities(&Matrix::zeros(3, 3)), Err(QcError::InvalidInput(_))));
     }
 
     /// A linear molecule keeps 5 translations/rotations and has 3N − 5 modes.

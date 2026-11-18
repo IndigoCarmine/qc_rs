@@ -793,10 +793,11 @@ $s_n$ は汎関数ごとの係数、$f_n$ は減衰関数。BJ 減衰は $C_n^(A
 $ "CN"_A = sum_(B != A) 1 / (1 + exp[-k_1 (k_2 (R_A^"cov" + R_B^"cov") / r_(A B) - 1)]), quad
   k_1 = 16, quad k_2 = 4 slash 3 $ <eq:d3-cn>
 
-$R^"cov"$ は Pyykkö と Atsumi（2009）の単結合の共有結合半径。
-*未確認：* 原論文がこの半径に何らかのスケール（たとえば金属だけ小さくする）を掛けているか、
-数表として持つ値が $k_2$ を掛ける前か後か。データを取り込むときに論文で確かめ、
-ここでは「数表の値は $k_2$ を掛ける前の半径 $R^"cov"$（$a_0$）」と約束しておく（掛けた後の値を持つなら @eq:d3-cn の $k_2$ を 1 にする）。
+$R^"cov"$ は Pyykkö と Atsumi（2009）の単結合の共有結合半径で、金属の値は 10 % 小さくしてある（データの出典の説明による）。
+取り込んだ数表（`data/dispersion/d3_h_ar.dat` の `rcov`）は $k_2$ を*掛けた後*の値 $k_2 R^"cov"$（$a_0$）である
+（`data/dispersion/README.md`：H と C で $0.32$ Å、$0.75$ Å の $4 slash 3$ 倍と一致し、これ以上スケールせずに参照プログラムのエネルギーを再現する）。
+したがって実装では数表の値をそのまま $k_2 R^"cov"$ として使い、$k_2$ を重ねて掛けない。
+*未照合：* この半径とスケールが原論文と同じかは、論文と照合していない。
 
 == $C_6$ の補間
 
@@ -818,9 +819,10 @@ $L_(i j) = exp(-k_3 (d_(i j) - d_min))$ で計算する（最大の重みが 1 �
 $ C_8^(A B) = 3 C_6^(A B) sqrt(Q_A Q_B) $ <eq:d3-c8>
 
 $Q_A$ は元素ごとの定数で、原子の $chevron.l r^4 chevron.r slash chevron.l r^2 chevron.r$ と $sqrt(Z_A)$ から作られる。
-*未確認：* $Q_A$ の正確な定義（$sqrt(Z_A) chevron.l r^4 chevron.r slash chevron.l r^2 chevron.r$ に掛かる係数の有無と値）、
-および He、Ne、Ar などの $chevron.l r^4 chevron.r slash chevron.l r^2 chevron.r$ が後から計算し直された版があるかとどちらを使うか。
-どちらも数表を取り込むステップで論文と照合してから決める。$C_8$ は $C_6$ に比例するので、$Q$ は配位数に依らない。
+取り込んだ数表の `r4r2`（$a_0$）は $sqrt(Q_A)$ そのものであり、$C_8^(A B) = 3 C_6^(A B) dot "r4r2"_A dot "r4r2"_B$ と使うと
+参照プログラムのエネルギーを再現する（`data/dispersion/README.md`）。He、Ne、Ar の値は後に計算し直された版（2018）である。
+*未確認：* $Q_A$ の定義そのもの（$sqrt(Z_A) chevron.l r^4 chevron.r slash chevron.l r^2 chevron.r$ に掛かる係数の有無と値）は論文と照合していないが、
+数表の値をそのまま使う限り実装には影響しない。$C_8$ は $C_6$ に比例するので、$Q$ は配位数に依らない。
 
 == Becke–Johnson 減衰
 

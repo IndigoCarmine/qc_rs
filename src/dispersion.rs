@@ -1,0 +1,508 @@
+//! DFT-D3 building blocks (theory.typ section sec:d3): the reference data, the
+//! coordination number with its nuclear derivatives (eq:d3-cn) and the Gaussian UNCHECKED(Grimme2010) UNCHECKED(Pyykko2009)
+//! interpolation of C6 with its derivatives with respect to the coordination
+//! numbers (eq:d3-c6). The damping functions, the energy and the gradient are UNCHECKED(Grimme2010)
+//! assembled elsewhere.
+
+use crate::error::{QcError, Result};
+use crate::molecule::{Atom, element_symbol};
+use std::sync::OnceLock;
+
+// DFT-D3 reference data for H–Ar (covalent radii, r4r2, reference coordination
+// numbers, reference C6, pairwise R0). Not original work of qc_rs: extracted from
+// tad-dftd3 0.7.0 and tad-mctc 0.8.0, distributed under the Apache License 2.0
+// (data/dispersion/LICENSE-APACHE-2.0.txt). The values go back to Grimme et al.
+// (2010); source, modifications, units and the meaning of every column are in
+// data/dispersion/README.md. A compiled program embeds this text and must carry
+// that attribution and license. UNCHECKED(Grimme2010)
+const D3_DATA: &str = include_str!("../data/dispersion/d3_h_ar.dat");
+
+/// Number of elements covered by the D3 data (H–Ar).
+pub const D3_MAX_Z: u32 = 18;
+
+/// Steepness k1 of the counting function, theory.typ eq:d3-cn.
+pub const K1: f64 = 16.0;
+/// Width k3 of the Gaussian weights, theory.typ eq:d3-c6.
+pub const K3: f64 = 4.0;
+
+const N_ELEM: usize = D3_MAX_Z as usize;
+
+/// Per-element D3 data.
+#[derive(Debug, Clone, PartialEq)]
+struct ElementData {
+    /// k2·R_cov in Bohr (k2 = 4/3 is already applied in the data file).
+    rcov: f64,
+    /// sqrt(Q) in Bohr, as used in C8 = 3 C6 r4r2_A r4r2_B.
+    r4r2: f64,
+    /// Reference coordination numbers, in the order of the data file.
+    cnref: Vec<f64>,
+}
+
+/// The DFT-D3 reference data for H–Ar (see `data/dispersion/README.md`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct D3Data {
+    elements: Vec<ElementData>,
+    /// r0ab[(za-1)*18 + (zb-1)], symmetric, Bohr.
+    r0ab: Vec<f64>,
+    /// c6[(za-1)*18 + (zb-1)][i*nref(zb) + j]: reference C6 for reference i of za
+    /// and reference j of zb, stored for both orders of the pair.
+    c6: Vec<Vec<f64>>,
+}
+
+/// C6 of an atom pair at given coordination numbers and its partial derivatives.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct C6Value {
+    /// C6^AB in E_h a0^6.
+    pub c6: f64,
+    /// ∂C6^AB/∂CN_A.
+    pub dc6_dcn_a: f64,
+    /// ∂C6^AB/∂CN_B.
+    pub dc6_dcn_b: f64,
+}
+
+/// Coordination numbers of all atoms and their derivatives with respect to the
+/// nuclear positions.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CoordinationNumbers {
+    /// CN_A for every atom A.
+    pub cn: Vec<f64>,
+    /// dcn_dr[a * n + c] = dCN_a / dR_c (Bohr⁻¹), n = number of atoms.
+    pub dcn_dr: Vec<[f64; 3]>,
+}
+
+/// The embedded D3 data, parsed once.
+pub fn d3_data() -> Result<&'static D3Data> {
+    static DATA: OnceLock<Result<D3Data>> = OnceLock::new();
+    DATA.get_or_init(|| D3Data::parse(D3_DATA)).as_ref().map_err(Clone::clone)
+}
+
+fn element_index(z: u32) -> Result<usize> {
+    if (1..=D3_MAX_Z).contains(&z) {
+        Ok(z as usize - 1)
+    } else {
+        Err(QcError::UnknownElement(format!("Z = {z} (DFT-D3 data cover H–Ar only)")))
+    }
+}
+
+impl D3Data {
+    /// Parses the text format of `data/dispersion/d3_h_ar.dat` (LF or CRLF line
+    /// endings). Every element H–Ar, every R0 pair and every reference C6 must be
+    /// given exactly once.
+    pub fn parse(text: &str) -> Result<Self> {
+        let mut elements: Vec<Option<ElementData>> = vec![None; N_ELEM];
+        let mut r0ab = vec![f64::NAN; N_ELEM * N_ELEM];
+        // Raw C6 records, keyed by (za, zb) with za <= zb, before the reference
+        // counts are known for certain.
+        let mut c6_records: Vec<(usize, usize, usize, usize, f64, usize)> = Vec::new();
+        let perr = |ln: usize, msg: &str| QcError::Parse(format!("D3 data: line {}: {msg}", ln + 1));
+        let num = |ln: usize, s: &str| -> Result<f64> {
+            s.parse::<f64>()
+                .ok()
+                .filter(|v| v.is_finite())
+                .ok_or_else(|| perr(ln, &format!("invalid number '{s}'")))
+        };
+        let int = |ln: usize, s: &str| -> Result<usize> {
+            s.parse::<usize>().map_err(|_| perr(ln, &format!("invalid integer '{s}'")))
+        };
+        let elem = |ln: usize, s: &str| -> Result<usize> {
+            let z = int(ln, s)?;
+            if (1..=N_ELEM).contains(&z) { Ok(z - 1) } else { Err(perr(ln, &format!("atomic number {z} outside 1..18"))) }
+        };
+
+        // str::lines strips "\n" and "\r\n"; trim also removes a stray "\r".
+        for (ln, line) in text.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let f: Vec<&str> = line.split_whitespace().collect();
+            match f[0] {
+                "element" => {
+                    if f.len() < 6 {
+                        return Err(perr(ln, "element record too short"));
+                    }
+                    let a = elem(ln, f[1])?;
+                    if element_symbol(a as u32 + 1) != Some(f[2]) {
+                        return Err(perr(ln, &format!("symbol '{}' does not match Z = {}", f[2], a + 1)));
+                    }
+                    let nref = int(ln, f[5])?;
+                    if nref == 0 || f.len() != 6 + nref {
+                        return Err(perr(ln, "number of reference CNs does not match nref"));
+                    }
+                    let cnref = f[6..].iter().map(|s| num(ln, s)).collect::<Result<Vec<_>>>()?;
+                    if elements[a].is_some() {
+                        return Err(perr(ln, "duplicate element record"));
+                    }
+                    elements[a] = Some(ElementData { rcov: num(ln, f[3])?, r4r2: num(ln, f[4])?, cnref });
+                }
+                "r0ab" => {
+                    if f.len() != 4 {
+                        return Err(perr(ln, "r0ab record must have 4 fields"));
+                    }
+                    let (a, b) = (elem(ln, f[1])?, elem(ln, f[2])?);
+                    if a > b {
+                        return Err(perr(ln, "r0ab record must have Za <= Zb"));
+                    }
+                    if !r0ab[a * N_ELEM + b].is_nan() {
+                        return Err(perr(ln, "duplicate r0ab record"));
+                    }
+                    let v = num(ln, f[3])?;
+                    r0ab[a * N_ELEM + b] = v;
+                    r0ab[b * N_ELEM + a] = v;
+                }
+                "c6" => {
+                    if f.len() != 6 {
+                        return Err(perr(ln, "c6 record must have 6 fields"));
+                    }
+                    let (a, b) = (elem(ln, f[1])?, elem(ln, f[2])?);
+                    if a > b {
+                        return Err(perr(ln, "c6 record must have Za <= Zb"));
+                    }
+                    let (i, j) = (int(ln, f[3])?, int(ln, f[4])?);
+                    if i == 0 || j == 0 {
+                        return Err(perr(ln, "reference indices are 1-based"));
+                    }
+                    c6_records.push((a, b, i - 1, j - 1, num(ln, f[5])?, ln));
+                }
+                other => return Err(perr(ln, &format!("unknown record '{other}'"))),
+            }
+        }
+
+        let elements = elements
+            .into_iter()
+            .enumerate()
+            .map(|(a, e)| e.ok_or_else(|| QcError::Parse(format!("D3 data: no element record for Z = {}", a + 1))))
+            .collect::<Result<Vec<_>>>()?;
+        if let Some(k) = r0ab.iter().position(|v| v.is_nan()) {
+            return Err(QcError::Parse(format!("D3 data: no r0ab for Z = {} / {}", k / N_ELEM + 1, k % N_ELEM + 1)));
+        }
+
+        let mut c6: Vec<Vec<f64>> = (0..N_ELEM * N_ELEM)
+            .map(|k| vec![f64::NAN; elements[k / N_ELEM].cnref.len() * elements[k % N_ELEM].cnref.len()])
+            .collect();
+        for &(a, b, i, j, v, ln) in &c6_records {
+            let (na, nb) = (elements[a].cnref.len(), elements[b].cnref.len());
+            if i >= na || j >= nb {
+                return Err(perr(ln, "reference index out of range"));
+            }
+            if !c6[a * N_ELEM + b][i * nb + j].is_nan() {
+                return Err(perr(ln, "duplicate c6 record"));
+            }
+            c6[a * N_ELEM + b][i * nb + j] = v;
+            if a != b {
+                // C6(Zb, Za, j, i) = C6(Za, Zb, i, j) (data/dispersion/README.md).
+                c6[b * N_ELEM + a][j * na + i] = v;
+            }
+        }
+        if let Some(k) = c6.iter().position(|t| t.iter().any(|v| v.is_nan())) {
+            return Err(QcError::Parse(format!(
+                "D3 data: incomplete c6 records for Z = {} / {}",
+                k / N_ELEM + 1,
+                k % N_ELEM + 1
+            )));
+        }
+        Ok(D3Data { elements, r0ab, c6 })
+    }
+
+    /// k2·R_cov of element `z` in Bohr (k2 = 4/3 included), theory.typ eq:d3-cn.
+    pub fn scaled_covalent_radius(&self, z: u32) -> Result<f64> {
+        Ok(self.elements[element_index(z)?].rcov)
+    }
+
+    /// The r4r2 factor of element `z` in Bohr (sqrt(Q) of theory.typ eq:d3-c8). UNCHECKED(Grimme2010)
+    pub fn r4r2(&self, z: u32) -> Result<f64> {
+        Ok(self.elements[element_index(z)?].r4r2)
+    }
+
+    /// Pairwise cutoff radius R0^AB in Bohr (zero damping, theory.typ eq:d3-zero). UNCHECKED(Grimme2010)
+    pub fn r0ab(&self, za: u32, zb: u32) -> Result<f64> {
+        Ok(self.r0ab[element_index(za)? * N_ELEM + element_index(zb)?])
+    }
+
+    /// Reference coordination numbers CN^i of element `z`.
+    pub fn reference_cn(&self, z: u32) -> Result<&[f64]> {
+        Ok(&self.elements[element_index(z)?].cnref)
+    }
+
+    /// Reference C6 for reference `i` of `za` and reference `j` of `zb` (0-based).
+    pub fn reference_c6(&self, za: u32, zb: u32, i: usize, j: usize) -> Result<f64> {
+        let (a, b) = (element_index(za)?, element_index(zb)?);
+        let (na, nb) = (self.elements[a].cnref.len(), self.elements[b].cnref.len());
+        if i >= na || j >= nb {
+            return Err(QcError::InvalidInput(format!("reference index ({i}, {j}) out of range for Z = {za} / {zb}")));
+        }
+        Ok(self.c6[a * N_ELEM + b][i * nb + j])
+    }
+
+    /// Coordination numbers of all atoms (positions in Bohr) and dCN_a/dR_c.
+    /// theory.typ eq:d3-cn and the derivative dg_AB/dr of the gradient section.
+    pub fn coordination_numbers(&self, atoms: &[Atom]) -> Result<CoordinationNumbers> {
+        let n = atoms.len();
+        let rcov = atoms
+            .iter()
+            .map(|a| self.scaled_covalent_radius(a.z))
+            .collect::<Result<Vec<_>>>()?;
+        let mut cn = vec![0.0; n];
+        let mut dcn_dr = vec![[0.0; 3]; n * n];
+        for a in 0..n {
+            for b in 0..a {
+                let d: [f64; 3] = std::array::from_fn(|k| atoms[a].position[k] - atoms[b].position[k]);
+                let r = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+                if r == 0.0 {
+                    return Err(QcError::InvalidInput(format!("atoms {a} and {b} coincide")));
+                }
+                // g = 1 / (1 + e^u), u = -k1 (R^c / r - 1), R^c = k2 (R_A + R_B).
+                let rc = rcov[a] + rcov[b];
+                let g = 1.0 / (1.0 + (-K1 * (rc / r - 1.0)).exp());
+                let dg = -g * (1.0 - g) * K1 * rc / (r * r);
+                cn[a] += g;
+                cn[b] += g;
+                // dr/dR_a = d / r, dr/dR_b = -d / r.
+                for k in 0..3 {
+                    let v = dg * d[k] / r;
+                    dcn_dr[a * n + a][k] += v;
+                    dcn_dr[a * n + b][k] -= v;
+                    dcn_dr[b * n + a][k] += v;
+                    dcn_dr[b * n + b][k] -= v;
+                }
+            }
+        }
+        Ok(CoordinationNumbers { cn, dcn_dr })
+    }
+
+    /// C6^AB of elements `za`, `zb` at coordination numbers `cn_a`, `cn_b`, with
+    /// ∂C6/∂CN_A and ∂C6/∂CN_B. theory.typ eq:d3-c6 (with the shift by d_min given
+    /// there, so that the weights cannot all underflow).
+    pub fn c6(&self, za: u32, zb: u32, cn_a: f64, cn_b: f64) -> Result<C6Value> {
+        let (a, b) = (element_index(za)?, element_index(zb)?);
+        let (ra, rb) = (&self.elements[a].cnref, &self.elements[b].cnref);
+        let table = &self.c6[a * N_ELEM + b];
+        let nb = rb.len();
+        let dist = |i: usize, j: usize| (cn_a - ra[i]).powi(2) + (cn_b - rb[j]).powi(2);
+        let mut dmin = f64::INFINITY;
+        for i in 0..ra.len() {
+            for j in 0..nb {
+                dmin = dmin.min(dist(i, j));
+            }
+        }
+        // Z = Σ C L, W = Σ L, and their derivatives; ∂L/∂CN_A = -2 k3 (CN_A - CN_A^i) L.
+        let (mut z, mut w) = (0.0, 0.0);
+        let (mut za_d, mut wa_d, mut zb_d, mut wb_d) = (0.0, 0.0, 0.0, 0.0);
+        for (i, &cri) in ra.iter().enumerate() {
+            for (j, &crj) in rb.iter().enumerate() {
+                let l = (-K3 * (dist(i, j) - dmin)).exp();
+                let c = table[i * nb + j];
+                let dla = -2.0 * K3 * (cn_a - cri) * l;
+                let dlb = -2.0 * K3 * (cn_b - crj) * l;
+                z += c * l;
+                w += l;
+                za_d += c * dla;
+                wa_d += dla;
+                zb_d += c * dlb;
+                wb_d += dlb;
+            }
+        }
+        Ok(C6Value {
+            c6: z / w,
+            dc6_dcn_a: (za_d * w - z * wa_d) / (w * w),
+            dc6_dcn_b: (zb_d * w - z * wb_d) / (w * w),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn data() -> &'static D3Data {
+        d3_data().expect("embedded D3 data must parse")
+    }
+
+    fn atoms(z: &[u32], pos: &[[f64; 3]]) -> Vec<Atom> {
+        z.iter().zip(pos).map(|(&z, &position)| Atom { z, position }).collect()
+    }
+
+    #[test]
+    fn embedded_data_contents() {
+        let d = data();
+        assert_eq!(d.reference_cn(1).unwrap(), &[0.9118, 0.0]);
+        assert_eq!(d.reference_cn(6).unwrap().len(), 5);
+        assert_eq!(d.reference_cn(18).unwrap(), &[0.0]);
+        assert_eq!(d.reference_c6(1, 1, 0, 0).unwrap(), 3.0267);
+        assert_eq!(d.reference_c6(1, 6, 0, 2).unwrap(), 9.4203);
+        assert_eq!(d.reference_c6(1, 6, 1, 0).unwrap(), 19.2653);
+        // The other half of the pair table is the transpose.
+        assert_eq!(d.reference_c6(6, 1, 2, 0).unwrap(), 9.4203);
+        assert_eq!(d.reference_c6(6, 1, 0, 1).unwrap(), 19.2653);
+        assert_eq!(d.r0ab(1, 6).unwrap(), 4.6283174);
+        assert_eq!(d.r0ab(6, 1).unwrap(), 4.6283174);
+        assert_eq!(d.scaled_covalent_radius(1).unwrap(), 0.8062831468620066);
+        assert_eq!(d.r4r2(1).unwrap(), 2.007349);
+    }
+
+    #[test]
+    fn parse_accepts_lf_and_crlf_alike() {
+        let lf = D3_DATA.replace("\r\n", "\n");
+        let crlf = lf.replace('\n', "\r\n");
+        assert_eq!(D3Data::parse(&lf).unwrap(), D3Data::parse(&crlf).unwrap());
+        assert_eq!(&D3Data::parse(&lf).unwrap(), data());
+    }
+
+    #[test]
+    fn parse_rejects_bad_input() {
+        let lf = D3_DATA.replace("\r\n", "\n");
+        let without = |prefix: &str| -> String {
+            lf.lines().filter(|l| !l.starts_with(prefix)).collect::<Vec<_>>().join("\n")
+        };
+        assert!(D3Data::parse(&without("element 7 ")).is_err());
+        assert!(D3Data::parse(&without("r0ab 3 9 ")).is_err());
+        assert!(D3Data::parse(&without("c6 6 8 2 3 ")).is_err());
+        assert!(D3Data::parse(&format!("{lf}\nc6 1 1 1 1 3.0")).is_err()); // duplicate
+        assert!(D3Data::parse(&format!("{lf}\nc6 2 1 1 1 3.0")).is_err()); // Za > Zb
+        assert!(D3Data::parse(&format!("{lf}\nc6 1 1 3 1 3.0")).is_err()); // index out of range
+        assert!(D3Data::parse(&format!("{lf}\nelement 19 K 1 1 1 0")).is_err());
+        assert!(D3Data::parse(&lf.replace("element 1 H ", "element 1 He ")).is_err());
+        assert!(D3Data::parse(&lf.replace("r0ab 1 1 4.1239495", "r0ab 1 1 nan")).is_err());
+    }
+
+    #[test]
+    fn unsupported_elements_are_errors() {
+        let d = data();
+        assert!(matches!(d.c6(19, 1, 0.0, 0.0), Err(QcError::UnknownElement(_))));
+        assert!(matches!(d.c6(1, 0, 0.0, 0.0), Err(QcError::UnknownElement(_))));
+        let mol = atoms(&[1, 19], &[[0.0; 3], [0.0, 0.0, 2.0]]);
+        assert!(matches!(d.coordination_numbers(&mol), Err(QcError::UnknownElement(_))));
+        let same = atoms(&[1, 1], &[[0.0; 3], [0.0; 3]]);
+        assert!(matches!(d.coordination_numbers(&same), Err(QcError::InvalidInput(_))));
+    }
+
+    #[test]
+    fn coordination_number_of_h2_and_isolated_atom() {
+        let d = data();
+        let r = 1.4;
+        let cn = d.coordination_numbers(&atoms(&[1, 1], &[[0.0; 3], [0.0, 0.0, r]])).unwrap();
+        let rc = 2.0 * 0.8062831468620066;
+        let g = 1.0 / (1.0 + (-16.0 * (rc / r - 1.0)).exp());
+        assert!((cn.cn[0] - g).abs() < 1e-15 && (cn.cn[1] - g).abs() < 1e-15);
+        // Near-equilibrium H2 is close to the H reference with CN = 0.9118.
+        assert!((cn.cn[0] - 0.9118).abs() < 0.1, "CN(H2) = {}", cn.cn[0]);
+        let single = d.coordination_numbers(&atoms(&[6], &[[1.0, 2.0, 3.0]])).unwrap();
+        assert_eq!(single.cn, vec![0.0]);
+        assert_eq!(single.dcn_dr, vec![[0.0; 3]]);
+    }
+
+    #[test]
+    fn c6_single_reference_elements_equal_the_table() {
+        let d = data();
+        for (za, zb) in [(2, 2), (2, 10), (10, 18), (18, 18)] {
+            let t = d.reference_c6(za, zb, 0, 0).unwrap();
+            for (ca, cb) in [(0.0, 0.0), (0.7, 2.3), (12.0, 0.1)] {
+                let v = d.c6(za, zb, ca, cb).unwrap();
+                assert!((v.c6 - t).abs() <= 1e-14 * t, "{za}-{zb}: {} vs {t}", v.c6);
+                assert_eq!((v.dc6_dcn_a, v.dc6_dcn_b), (0.0, 0.0));
+            }
+        }
+    }
+
+    #[test]
+    fn c6_weights_by_hand() {
+        // H (two references) with He (one): C6 = Σ_i W_i C6(H, He, i, 1).
+        let d = data();
+        let cn_h = 0.5;
+        let refs = d.reference_cn(1).unwrap();
+        let l: Vec<f64> = refs.iter().map(|&r| (-4.0 * (cn_h - r) * (cn_h - r)).exp()).collect();
+        let expect = (l[0] * d.reference_c6(1, 2, 0, 0).unwrap() + l[1] * d.reference_c6(1, 2, 1, 0).unwrap())
+            / (l[0] + l[1]);
+        let v = d.c6(1, 2, cn_h, 1.7).unwrap();
+        assert!((v.c6 - expect).abs() < 1e-13 * expect);
+        // CN equal to the reference CN of an element with a single reference: the
+        // table value itself.
+        let a = d.c6(18, 18, 0.0, 0.0).unwrap().c6;
+        assert_eq!(a, d.reference_c6(18, 18, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn c6_is_symmetric_in_the_pair() {
+        let d = data();
+        for (za, zb, ca, cb) in [(1, 6, 0.9, 3.1), (6, 8, 2.2, 1.1), (7, 14, 0.3, 3.9), (6, 6, 1.4, 3.6)] {
+            let ab = d.c6(za, zb, ca, cb).unwrap();
+            let ba = d.c6(zb, za, cb, ca).unwrap();
+            assert!((ab.c6 - ba.c6).abs() <= 1e-13 * ab.c6);
+            assert!((ab.dc6_dcn_a - ba.dc6_dcn_b).abs() <= 1e-12 * ab.c6);
+            assert!((ab.dc6_dcn_b - ba.dc6_dcn_a).abs() <= 1e-12 * ab.c6);
+        }
+    }
+
+    #[test]
+    fn c6_far_from_all_references_does_not_underflow() {
+        // At CN = 60 every unshifted weight exp(-4 d) underflows to 0. The shifted
+        // form of eq:d3-c6 gives the limit: only the C reference with the largest CN
+        // (index 4) contributes.
+        let d = data();
+        let cn_h = 0.3;
+        let v = d.c6(6, 1, 60.0, cn_h).unwrap();
+        let refs = d.reference_cn(1).unwrap();
+        let l: Vec<f64> = refs.iter().map(|&r| (-4.0 * (cn_h - r) * (cn_h - r)).exp()).collect();
+        let expect = (l[0] * d.reference_c6(6, 1, 4, 0).unwrap() + l[1] * d.reference_c6(6, 1, 4, 1).unwrap())
+            / (l[0] + l[1]);
+        assert!(v.c6.is_finite() && v.dc6_dcn_a.is_finite() && v.dc6_dcn_b.is_finite());
+        assert!((v.c6 - expect).abs() < 1e-12 * expect, "{} vs {expect}", v.c6);
+        assert!(v.dc6_dcn_a.abs() < 1e-12);
+    }
+
+    #[test]
+    fn c6_derivatives_match_central_differences() {
+        let d = data();
+        let h = 1e-5;
+        for (za, zb, ca, cb) in
+            [(1, 1, 0.4, 0.95), (1, 6, 0.9, 3.1), (6, 8, 2.2, 1.1), (7, 14, 0.3, 3.9), (5, 13, 4.2, 2.5), (8, 16, 1.5, 0.6)]
+        {
+            let v = d.c6(za, zb, ca, cb).unwrap();
+            let num_a = (d.c6(za, zb, ca + h, cb).unwrap().c6 - d.c6(za, zb, ca - h, cb).unwrap().c6) / (2.0 * h);
+            let num_b = (d.c6(za, zb, ca, cb + h).unwrap().c6 - d.c6(za, zb, ca, cb - h).unwrap().c6) / (2.0 * h);
+            let tol = 1e-8 * v.c6.max(1.0);
+            assert!((num_a - v.dc6_dcn_a).abs() < tol, "{za}-{zb} dA: {num_a} vs {}", v.dc6_dcn_a);
+            assert!((num_b - v.dc6_dcn_b).abs() < tol, "{za}-{zb} dB: {num_b} vs {}", v.dc6_dcn_b);
+        }
+    }
+
+    #[test]
+    fn coordination_number_derivatives_match_central_differences() {
+        let d = data();
+        let z = [8, 1, 1, 6, 1, 17];
+        let pos = [
+            [0.0, 0.0, 0.0],
+            [1.8, 0.1, 0.0],
+            [-0.5, 1.7, 0.2],
+            [0.3, -0.4, 2.9],
+            [1.2, -1.9, 3.6],
+            [-2.6, -0.8, 3.3],
+        ];
+        let mol = atoms(&z, &pos);
+        let n = mol.len();
+        let cn = d.coordination_numbers(&mol).unwrap();
+        let h = 1e-5;
+        for c in 0..n {
+            for k in 0..3 {
+                let shifted = |s: f64| {
+                    let mut m = mol.clone();
+                    m[c].position[k] += s;
+                    d.coordination_numbers(&m).unwrap().cn
+                };
+                let (p, m) = (shifted(h), shifted(-h));
+                for a in 0..n {
+                    let num = (p[a] - m[a]) / (2.0 * h);
+                    let ana = cn.dcn_dr[a * n + c][k];
+                    assert!((num - ana).abs() < 1e-8, "dCN_{a}/dR_{c},{k}: {num} vs {ana}");
+                }
+            }
+        }
+        // Translational invariance: Σ_c dCN_a/dR_c = 0.
+        for a in 0..n {
+            for k in 0..3 {
+                let s: f64 = (0..n).map(|c| cn.dcn_dr[a * n + c][k]).sum();
+                assert!(s.abs() < 1e-14);
+            }
+        }
+    }
+}

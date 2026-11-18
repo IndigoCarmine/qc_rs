@@ -218,3 +218,6 @@ Pritchard ほか (2019) を引用してください。データ自体の再配�
 ## ライセンス
 
 BSD 3-Clause（`LICENSE` を参照）。
+
+基底関数のデータ（`data/basis/`）だけは qc_rs の著作物ではなく、Basis Set Exchange に帰属します。
+出典・ライセンス・引用すべき文献は [data/basis/README.md](data/basis/README.md) にあります。

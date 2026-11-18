@@ -6,7 +6,7 @@
 //! analysis itself does no electronic-structure work.
 
 use crate::error::{QcError, Result};
-use crate::linalg::{Matrix, symmetric_eigen};
+use crate::linalg::{Matrix, SymmetricEigen, symmetric_eigen};
 use crate::molecule::Molecule;
 
 /// Standard atomic weights (u) of H–Ar, IUPAC/CIAAW 2013 (Meija et al. 2016), conventional
@@ -33,10 +33,10 @@ const STANDARD_ATOMIC_MASSES: [f64; 18] = [
 ];
 
 /// E_h / (h c) in cm⁻¹ (CODATA 2018). theory.typ eq:freq UNCHECKED(CODATA2018)
-const HARTREE_IN_WAVENUMBER: f64 = 219474.6313632;
+pub(crate) const HARTREE_IN_WAVENUMBER: f64 = 219474.6313632;
 
 /// m_e / m_u (CODATA 2018). theory.typ eq:freq UNCHECKED(CODATA2018)
-const ELECTRON_MASS_IN_U: f64 = 5.48579909065e-4;
+pub(crate) const ELECTRON_MASS_IN_U: f64 = 5.48579909065e-4;
 
 /// A rotation a is kept only if I_a > ROTATION_THRESHOLD · I_3 (theory.typ
 /// eq:tr-vectors; a numerical convention, not a literature value). DERIVED
@@ -55,6 +55,73 @@ pub fn standard_atomic_mass(z: u32) -> Option<f64> {
     } else {
         None
     }
+}
+
+/// Masses (u, one per atom): `masses` after validation, or [`standard_atomic_mass`].
+pub(crate) fn resolve_masses(mol: &Molecule, masses: Option<&[f64]>) -> Result<Vec<f64>> {
+    let atoms = mol.atoms();
+    let n_atom = atoms.len();
+    match masses {
+        Some(m) => {
+            if m.len() != n_atom {
+                return Err(QcError::InvalidInput(format!("{} masses given for {n_atom} atoms", m.len())));
+            }
+            if let Some(bad) = m.iter().find(|x| !(x.is_finite() && **x > 0.0)) {
+                return Err(QcError::InvalidInput(format!("atomic masses must be finite and positive, got {bad}")));
+            }
+            Ok(m.to_vec())
+        }
+        None => atoms
+            .iter()
+            .map(|a| {
+                standard_atomic_mass(a.z)
+                    .ok_or_else(|| QcError::InvalidInput(format!("no standard atomic mass for Z = {}", a.z)))
+            })
+            .collect(),
+    }
+}
+
+/// Positions relative to the centre of mass, principal moments and axes, and the
+/// rotations kept (theory.typ eq:tr-vectors).
+pub(crate) struct InertiaFrame {
+    /// r_A = R_A − R_cm (Bohr).
+    pub r: Vec<[f64; 3]>,
+    /// Principal moments I_1 ≤ I_2 ≤ I_3 (u Bohr²) and axes (columns).
+    pub principal: SymmetricEigen,
+    /// Indices a of the kept rotations, ascending: I_a > 10⁻⁶ I_3 and
+    /// I_3 > 10⁻²⁰ Σ_A m_A |R_A|². Two for a linear molecule, none for one atom.
+    pub kept_rotations: Vec<usize>,
+}
+
+/// Centre of mass, inertia tensor and principal axes of `mol` with `masses` (u), and the
+/// rotation rule of theory.typ eq:tr-vectors. DERIVED
+pub(crate) fn inertia_frame(mol: &Molecule, masses: &[f64]) -> Result<InertiaFrame> {
+    let atoms = mol.atoms();
+    let total_mass: f64 = masses.iter().sum();
+    let mut com = [0.0; 3];
+    for (a, m) in atoms.iter().zip(masses) {
+        for (c, x) in com.iter_mut().zip(a.position) {
+            *c += m * x / total_mass;
+        }
+    }
+    let r: Vec<[f64; 3]> = atoms.iter().map(|a| [0, 1, 2].map(|k| a.position[k] - com[k])).collect();
+    let mut inertia = Matrix::zeros(3, 3);
+    for (ra, m) in r.iter().zip(masses) {
+        let r2 = ra[0] * ra[0] + ra[1] * ra[1] + ra[2] * ra[2];
+        for p in 0..3 {
+            for q in 0..3 {
+                inertia[(p, q)] += m * (if p == q { r2 } else { 0.0 } - ra[p] * ra[q]);
+            }
+        }
+    }
+    let principal = symmetric_eigen(&inertia)?;
+    let i3 = principal.values[2];
+    let raw_second_moment: f64 =
+        atoms.iter().zip(masses).map(|(a, m)| m * a.position.iter().map(|x| x * x).sum::<f64>()).sum();
+    let has_rotations = i3 > ROTATION_ABSOLUTE_THRESHOLD * raw_second_moment;
+    let kept_rotations =
+        (0..3).filter(|&a| has_rotations && principal.values[a] > ROTATION_THRESHOLD * i3).collect();
+    Ok(InertiaFrame { r, principal, kept_rotations })
 }
 
 /// Result of [`harmonic_analysis`].
@@ -120,73 +187,31 @@ pub fn harmonic_analysis(mol: &Molecule, hessian: &Matrix, masses: Option<&[f64]
     if !hessian.as_slice().iter().all(|x| x.is_finite()) {
         return Err(QcError::InvalidInput("Hessian has non-finite elements".into()));
     }
-    let masses: Vec<f64> = match masses {
-        Some(m) => {
-            if m.len() != n_atom {
-                return Err(QcError::InvalidInput(format!("{} masses given for {n_atom} atoms", m.len())));
-            }
-            if let Some(bad) = m.iter().find(|x| !(x.is_finite() && **x > 0.0)) {
-                return Err(QcError::InvalidInput(format!("atomic masses must be finite and positive, got {bad}")));
-            }
-            m.to_vec()
-        }
-        None => atoms
-            .iter()
-            .map(|a| {
-                standard_atomic_mass(a.z)
-                    .ok_or_else(|| QcError::InvalidInput(format!("no standard atomic mass for Z = {}", a.z)))
-            })
-            .collect::<Result<_>>()?,
-    };
+    let masses = resolve_masses(mol, masses)?;
     let sqrt_m: Vec<f64> = (0..n).map(|i| masses[i / 3].sqrt()).collect();
 
     // eq:mass-weight: H̃_ij = H_ij / √(m_i m_j), on the symmetric part of H.
     let hmw = Matrix::from_fn(n, n, |i, j| 0.5 * (hessian[(i, j)] + hessian[(j, i)]) / (sqrt_m[i] * sqrt_m[j]));
 
     // eq:tr-vectors: centre of mass, inertia tensor, principal axes.
-    let total_mass: f64 = masses.iter().sum();
-    let mut com = [0.0; 3];
-    for (a, m) in atoms.iter().zip(&masses) {
-        for (c, x) in com.iter_mut().zip(a.position) {
-            *c += m * x / total_mass;
-        }
-    }
-    let r: Vec<[f64; 3]> = atoms.iter().map(|a| [0, 1, 2].map(|k| a.position[k] - com[k])).collect();
-    let mut inertia = Matrix::zeros(3, 3);
-    for (ra, m) in r.iter().zip(&masses) {
-        let r2 = ra[0] * ra[0] + ra[1] * ra[1] + ra[2] * ra[2];
-        for p in 0..3 {
-            for q in 0..3 {
-                inertia[(p, q)] += m * (if p == q { r2 } else { 0.0 } - ra[p] * ra[q]);
-            }
-        }
-    }
-    let principal = symmetric_eigen(&inertia)?;
-    let i3 = principal.values[2];
-    let raw_second_moment: f64 =
-        atoms.iter().zip(&masses).map(|(a, m)| m * a.position.iter().map(|x| x * x).sum::<f64>()).sum();
-    let has_rotations = i3 > ROTATION_ABSOLUTE_THRESHOLD * raw_second_moment;
+    let InertiaFrame { r, principal, kept_rotations } = inertia_frame(mol, &masses)?;
 
     let mut tr: Vec<Vec<f64>> = Vec::with_capacity(6);
     for alpha in 0..3 {
         // (t_α)_A = √m_A e_α
         tr.push((0..n).map(|i| if i % 3 == alpha { sqrt_m[i] } else { 0.0 }).collect());
     }
-    let mut n_rot = 0;
-    for a in 0..3 {
-        if has_rotations && principal.values[a] > ROTATION_THRESHOLD * i3 {
-            // (r_a)_A = √m_A u_a × r_A
-            let u = [principal.vectors[(0, a)], principal.vectors[(1, a)], principal.vectors[(2, a)]];
-            let mut v = vec![0.0; n];
-            for (atom, ra) in r.iter().enumerate() {
-                let c = [u[1] * ra[2] - u[2] * ra[1], u[2] * ra[0] - u[0] * ra[2], u[0] * ra[1] - u[1] * ra[0]];
-                for k in 0..3 {
-                    v[3 * atom + k] = sqrt_m[3 * atom] * c[k];
-                }
+    for &a in &kept_rotations {
+        // (r_a)_A = √m_A u_a × r_A
+        let u = [principal.vectors[(0, a)], principal.vectors[(1, a)], principal.vectors[(2, a)]];
+        let mut v = vec![0.0; n];
+        for (atom, ra) in r.iter().enumerate() {
+            let c = [u[1] * ra[2] - u[2] * ra[1], u[2] * ra[0] - u[0] * ra[2], u[0] * ra[1] - u[1] * ra[0]];
+            for k in 0..3 {
+                v[3 * atom + k] = sqrt_m[3 * atom] * c[k];
             }
-            tr.push(v);
-            n_rot += 1;
         }
+        tr.push(v);
     }
     // Normalize and orthogonalize by modified Gram–Schmidt (eq:tr-vectors).
     let mut d_tr: Vec<Vec<f64>> = Vec::with_capacity(tr.len());
@@ -243,7 +268,7 @@ pub fn harmonic_analysis(mol: &Molecule, hessian: &Matrix, masses: Option<&[f64]
         reduced_masses,
         eigenvalues: block_eig.values,
         n_trans_rot,
-        is_linear: n_rot == 2,
+        is_linear: kept_rotations.len() == 2,
         masses,
     })
 }

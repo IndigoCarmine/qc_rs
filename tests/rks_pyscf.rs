@@ -1,6 +1,6 @@
 //! RKS single points compared against PySCF reference values
 //! (tests/reference/pyscf_reference.json; PySCF used an unpruned (150, 1202 Lebedev)
-//! grid, we use the fine product grid of theory.typ section 8.4).
+//! grid, we use the fine product grid of theory.typ `<sec:rks>`).
 
 use qc_rs::basis::{Basis, BasisOptions, BasisSetDefinition};
 use qc_rs::{Functional, GridSettings, Molecule, ScfOptions, Unit, dipole_moment, run_rks};

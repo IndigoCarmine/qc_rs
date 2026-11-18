@@ -1,5 +1,5 @@
 //! Closed-shell Kohn–Sham DFT: numerical XC energy and potential on the molecular
-//! grid (theory.typ section 8: eq:rho, eq:exc, eq:vxc) and the RKS driver. UNCHECKED(Johnson1993) VERIFIED(Kohn1965, Eq. (2.3), p. A1133; continuous LDA integral only, quadrature not in paper)
+//! grid (theory.typ `<sec:rks>`: eq:rho, eq:exc, eq:vxc) and the RKS driver. UNCHECKED(Johnson1993) VERIFIED(Kohn1965, Eq. (2.3), p. A1133; continuous LDA integral only, quadrature not in paper)
 //!
 //! Grid points are processed per [`GridBlock`] (one radial shell of one atom) in
 //! parallel. For every block only the shells that can be non-negligible on it are
@@ -21,9 +21,9 @@ use crate::scf::{ExchangeCorrelation, ScfOptions, ScfResult, XcTerm, run_scf};
 use rayon::prelude::*;
 use std::time::Instant;
 
-/// Points with ρ below this contribute nothing to E_xc and V^xc. theory.typ section 8.3
+/// Points with ρ below this contribute nothing to E_xc and V^xc. theory.typ `<sec:rks>`, below eq:vxc
 pub const RHO_CUTOFF: f64 = 1e-10;
-/// σ is raised to at least this value (derivatives of √σ). theory.typ section 8.3
+/// σ is raised to at least this value (derivatives of √σ). theory.typ `<sec:rks>`, below eq:vxc
 pub const SIGMA_FLOOR: f64 = 1e-40;
 /// Screening threshold on |χ|, |∇χ| and |∇∇χ| (see the module documentation).
 pub const AO_SCREENING_EPS: f64 = 1e-15;
@@ -152,7 +152,7 @@ pub fn density_on_points(ao: &AoValues, p: &[f64], gradient: bool) -> (Vec<f64>,
 }
 
 /// f, v_ρ, v_σ at points with density `rho` and gradient `grad` (empty for LDA),
-/// applying the cut-offs of theory.typ section 8.3.
+/// applying the cut-offs of theory.typ `<sec:rks>` (below eq:vxc).
 pub fn xc_on_points(functional: &Functional, rho: Vec<f64>, grad: Vec<[f64; 3]>) -> PointData {
     let np = rho.len();
     let (mut f, mut vr, mut vs) = (vec![0.0; np], vec![0.0; np], vec![0.0; np]);
@@ -699,7 +699,7 @@ pub struct RksResult {
     pub n_grid_points: usize,
 }
 
-/// Closed-shell Kohn–Sham single-point energy (theory.typ section 8).
+/// Closed-shell Kohn–Sham single-point energy (theory.typ `<sec:rks>`).
 pub fn run_rks(
     mol: &Molecule,
     basis: &Basis,

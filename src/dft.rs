@@ -611,22 +611,8 @@ impl XcIntegrator {
         // φ_ν(g) = w [½ v_ρ χ_ν + 2 v_σ ∇ρ·∇χ_ν]; V = M + Mᵀ with M_μν = Σ_g χ_μ φ_ν
         // reproduces theory.typ eq:vxc.
         let chi = ao.component(0);
-        let mut phi = vec![0.0; na * np];
-        for a in 0..na {
-            let ph = &mut phi[a * np..(a + 1) * np];
-            let ca = &chi[a * np..(a + 1) * np];
-            for g in 0..np {
-                ph[g] = 0.5 * w[g] * pd.v_rho[g] * ca[g];
-            }
-            if gga {
-                for i in 0..3 {
-                    let d = &ao.component(D_X + i)[a * np..(a + 1) * np];
-                    for g in 0..np {
-                        ph[g] += 2.0 * w[g] * pd.v_sigma[g] * pd.grad_rho[g][i] * d[g];
-                    }
-                }
-            }
-        }
+        let grads = gga.then(|| [ao.component(D_X), ao.component(D_X + 1), ao.component(D_X + 2)]);
+        let phi = phi_on_points(chi, grads, w, &pd);
         bt.phi_seconds = lap();
         let v = ao_products(chi, &phi, na, np);
         let mut vs = vec![0.0; na * na];
@@ -638,6 +624,47 @@ impl XcIntegrator {
         bt.products_seconds = lap();
         Some((exc, nel, vs, bt))
     }
+}
+
+/// φ_ν(g) = w_g [½ v_ρ χ_ν + 2 v_σ ∇ρ·∇χ_ν] for every AO row of `chi`
+/// (row-major, `chi.len() / w.len()` rows); `grads` holds ∂χ/∂x, ∂χ/∂y,
+/// ∂χ/∂z in the same layout for a GGA and is `None` for an LDA
+/// (theory.typ eq:vxc).
+///
+/// The per-point factors c0 = (½w)v_ρ and c_i = ((2w)v_σ)∂_iρ are formed once
+/// per block instead of once per AO. They are the same left-to-right
+/// products that `0.5 * w * v_rho * χ` and `2.0 * w * v_sigma * grad_rho[i] * d`
+/// evaluate, and each φ element is summed left to right as
+/// ((c0·χ + c1·∂_xχ) + c2·∂_yχ) + c3·∂_zχ without FMA, the order of the
+/// per-AO `ph = …; ph += …` loop, so φ is bit-identical to it.
+fn phi_on_points(chi: &[f64], grads: Option<[&[f64]; 3]>, w: &[f64], pd: &PointData) -> Vec<f64> {
+    let np = w.len();
+    let mut phi = vec![0.0; chi.len()];
+    if np == 0 {
+        return phi;
+    }
+    let c0: Vec<f64> = w.iter().zip(&pd.v_rho).map(|(wg, vr)| 0.5 * wg * vr).collect();
+    let cg: Option<[Vec<f64>; 3]> = grads.map(|_| {
+        std::array::from_fn(|i| (0..np).map(|g| 2.0 * w[g] * pd.v_sigma[g] * pd.grad_rho[g][i]).collect())
+    });
+    for (a, ph) in phi.chunks_exact_mut(np).enumerate() {
+        let row = a * np..(a + 1) * np;
+        let x0 = &chi[row.clone()];
+        match (&grads, &cg) {
+            (Some(d), Some([c1, c2, c3])) => {
+                let (x1, x2, x3) = (&d[0][row.clone()], &d[1][row.clone()], &d[2][row]);
+                for g in 0..np {
+                    ph[g] = c0[g] * x0[g] + c1[g] * x1[g] + c2[g] * x2[g] + c3[g] * x3[g];
+                }
+            }
+            _ => {
+                for ((p, c), x) in ph.iter_mut().zip(&c0).zip(x0) {
+                    *p = c * x;
+                }
+            }
+        }
+    }
+    phi
 }
 
 impl ExchangeCorrelation for XcIntegrator {
@@ -742,6 +769,50 @@ mod tests {
                 let an = if m == n { ev.potential[(m, n)] } else { 2.0 * ev.potential[(m, n)] };
                 assert!((fd - an).abs() < 1e-6 * an.abs().max(1.0), "{} ({m},{n}): {an} vs {fd}", fun.name());
             }
+        }
+    }
+
+    #[test]
+    fn phi_matches_per_ao_expression_bitwise() {
+        // phi_on_points must give exactly the bits of the per-AO expression
+        // φ = 0.5·w·v_ρ·χ (+ 2·w·v_σ·∂_iρ·∂_iχ for i = x, y, z).
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut rnd = move || {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((state >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0
+        };
+        let (na, np) = (7, 37);
+        let w: Vec<f64> = (0..np).map(|_| rnd().abs() * 3.7).collect();
+        let chi: Vec<f64> = (0..na * np).map(|_| rnd()).collect();
+        let d: Vec<Vec<f64>> = (0..3).map(|_| (0..na * np).map(|_| rnd() * 1.3).collect()).collect();
+        let pd = PointData {
+            rho: vec![],
+            grad_rho: (0..np).map(|_| [rnd(), rnd(), rnd()]).collect(),
+            f: vec![],
+            v_rho: (0..np).map(|_| rnd() * 0.9).collect(),
+            v_sigma: (0..np).map(|_| rnd() * 0.01).collect(),
+        };
+        for gga in [false, true] {
+            let mut want = vec![0.0; na * np];
+            for a in 0..na {
+                let ph = &mut want[a * np..(a + 1) * np];
+                let ca = &chi[a * np..(a + 1) * np];
+                for g in 0..np {
+                    ph[g] = 0.5 * w[g] * pd.v_rho[g] * ca[g];
+                }
+                if gga {
+                    for (i, di) in d.iter().enumerate() {
+                        let di = &di[a * np..(a + 1) * np];
+                        for g in 0..np {
+                            ph[g] += 2.0 * w[g] * pd.v_sigma[g] * pd.grad_rho[g][i] * di[g];
+                        }
+                    }
+                }
+            }
+            let grads = gga.then(|| [d[0].as_slice(), d[1].as_slice(), d[2].as_slice()]);
+            let got = phi_on_points(&chi, grads, &w, &pd);
+            let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+            assert_eq!(bits(&got), bits(&want), "gga = {gga}");
         }
     }
 

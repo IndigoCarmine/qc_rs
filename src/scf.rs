@@ -5,7 +5,7 @@ use crate::basis::Basis;
 use crate::error::{QcError, Result};
 use crate::integrals::{EriTensor, core_hamiltonian, overlap};
 use crate::linalg::{Matrix, solve, symmetric_eigen};
-use crate::molecule::Molecule;
+use crate::molecule::{Atom, Molecule};
 use std::collections::VecDeque;
 
 /// Exchange-correlation contribution evaluated for a given density matrix.
@@ -40,6 +40,17 @@ impl ExchangeCorrelation for HartreeFock {
     }
 }
 
+/// How the starting density is chosen when none is supplied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InitialGuess {
+    /// Superposition of spherically averaged atomic densities (theory.typ eq:sad).
+    #[default]
+    AtomicDensities,
+    /// Orbitals of the core Hamiltonian. Cheap, but a poor start for larger molecules:
+    /// DIIS can fail to converge from it.
+    CoreHamiltonian,
+}
+
 /// SCF settings (defaults from theory.typ section 6.3).
 #[derive(Debug, Clone)]
 pub struct ScfOptions {
@@ -55,8 +66,11 @@ pub struct ScfOptions {
     pub schwarz_threshold: f64,
     /// Smallest allowed overlap eigenvalue.
     pub linear_dependence_threshold: f64,
-    /// Starting density matrix (e.g. from a previous geometry); core guess if `None`.
+    /// Starting density matrix (e.g. from a previous geometry); if `None`, the
+    /// density is built according to `initial_guess`.
     pub initial_density: Option<Matrix>,
+    /// Guess used when `initial_density` is `None`.
+    pub initial_guess: InitialGuess,
 }
 
 impl Default for ScfOptions {
@@ -69,6 +83,7 @@ impl Default for ScfOptions {
             schwarz_threshold: 1e-12,
             linear_dependence_threshold: 1e-8,
             initial_density: None,
+            initial_guess: InitialGuess::default(),
         }
     }
 }
@@ -183,6 +198,91 @@ fn density(c: &Matrix, nocc: usize) -> Matrix {
     p
 }
 
+/// Occupation numbers of a spherically averaged atom (theory.typ eq:sad-occ): orbitals
+/// are filled in order of energy, and a set of degenerate orbitals shares its electrons
+/// equally.
+fn atomic_occupations(energies: &[f64], n_electrons: usize) -> Vec<f64> {
+    let mut occ = vec![0.0; energies.len()];
+    let mut remaining = n_electrons as f64;
+    let mut start = 0;
+    while remaining > 0.0 && start < energies.len() {
+        let mut end = start + 1;
+        while end < energies.len() && (energies[end] - energies[start]).abs() < 1e-6 {
+            end += 1;
+        }
+        let g = (end - start) as f64;
+        let n = remaining.min(2.0 * g);
+        for o in &mut occ[start..end] {
+            *o = n / g;
+        }
+        remaining -= n;
+        start = end;
+    }
+    occ
+}
+
+/// Density of one neutral, spherically averaged atom in its own basis: a small
+/// Hartree–Fock calculation with fractional occupations (theory.typ eq:sad-occ).
+fn atomic_density(atom: Atom, basis: &Basis, schwarz_threshold: f64) -> Result<Matrix> {
+    let mol = Molecule::new(vec![atom], 0)?;
+    let n = basis.nao();
+    let s = overlap(basis);
+    let se = symmetric_eigen(&s)?;
+    let u = &se.vectors;
+    // Atomic basis sets are far from linear dependence; clamp instead of failing.
+    let x = Matrix::from_fn(n, n, |i, j| (0..n).map(|k| u[(i, k)] * u[(j, k)] / se.values[k].max(1e-10).sqrt()).sum());
+    let h = core_hamiltonian(basis, &mol);
+    let eri = EriTensor::compute(basis, schwarz_threshold);
+    let nelec = atom.z as usize;
+    let mut p = Matrix::zeros(n, n);
+    for iter in 0..100 {
+        let f = if iter == 0 {
+            h.clone()
+        } else {
+            let (j, k) = eri.coulomb_exchange(&p, true);
+            &(&h + &j) - &k.expect("exchange requested").scaled(0.5)
+        };
+        let e = symmetric_eigen(&x.transpose().matmul(&f).matmul(&x))?;
+        let c = x.matmul(&e.vectors);
+        let occ = atomic_occupations(&e.values, nelec);
+        let p_new = Matrix::from_fn(n, n, |a, b| (0..n).map(|i| occ[i] * c[(a, i)] * c[(b, i)]).sum());
+        let change = (&p_new - &p).max_abs();
+        // Plain 50 % damping is enough for atoms; the result only seeds the molecular SCF.
+        p = if iter == 0 { p_new } else { &p.scaled(0.5) + &p_new.scaled(0.5) };
+        if change < 1e-6 {
+            break;
+        }
+    }
+    Ok(p)
+}
+
+/// Initial density as a superposition of atomic densities: the block-diagonal matrix
+/// of the densities of the neutral, spherically averaged atoms (theory.typ eq:sad).
+/// It has the right number of electrons for a neutral molecule and is not idempotent;
+/// the first diagonalization of the SCF restores both.
+pub fn atomic_density_guess(mol: &Molecule, basis: &Basis, schwarz_threshold: f64) -> Result<Matrix> {
+    let n = basis.nao();
+    let mut p = Matrix::zeros(n, n);
+    let mut cache: Vec<(u32, Matrix)> = Vec::new();
+    let mut offset = 0;
+    for (ia, atom) in mol.atoms().iter().enumerate() {
+        let sub = basis.atom_basis(ia);
+        let m = sub.nao();
+        if !cache.iter().any(|(z, pa)| *z == atom.z && pa.rows() == m) {
+            cache.push((atom.z, atomic_density(*atom, &sub, schwarz_threshold)?));
+        }
+        let pa = &cache.iter().find(|(z, pa)| *z == atom.z && pa.rows() == m).expect("just inserted").1;
+        // AOs are ordered atom by atom, so the atom's block is contiguous.
+        for a in 0..m {
+            for b in 0..m {
+                p[(offset + a, offset + b)] = pa[(a, b)];
+            }
+        }
+        offset += m;
+    }
+    Ok(p)
+}
+
 /// Generic closed-shell SCF with DIIS for the Fock matrix of theory.typ eq:fock-rks.
 pub fn run_scf(
     mol: &Molecule,
@@ -233,10 +333,13 @@ pub fn run_scf(
             }
             p0.clone()
         }
-        None => {
-            let (_, c) = sys.diagonalize(&sys.h)?;
-            density(&c, nocc)
-        }
+        None => match options.initial_guess {
+            InitialGuess::AtomicDensities => atomic_density_guess(mol, basis, options.schwarz_threshold)?,
+            InitialGuess::CoreHamiltonian => {
+                let (_, c) = sys.diagonalize(&sys.h)?;
+                density(&c, nocc)
+            }
+        },
     };
 
     let mut diis: VecDeque<(Matrix, Matrix)> = VecDeque::new();
@@ -343,5 +446,56 @@ fn diis_extrapolate(diis: &mut VecDeque<(Matrix, Matrix)>) -> Result<Matrix> {
             }
             Err(e) => return Err(e),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::molecule::Unit;
+
+    #[test]
+    fn atomic_occupations_fill_degenerate_sets_equally() {
+        // Carbon-like: 1s, 2s, three degenerate 2p, then higher orbitals.
+        let eps = [-11.0, -0.7, -0.4, -0.4, -0.4, 0.5, 0.9];
+        let occ = atomic_occupations(&eps, 6);
+        let expect = [2.0, 2.0, 2.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0, 0.0, 0.0];
+        for (o, e) in occ.iter().zip(expect) {
+            assert!((o - e).abs() < 1e-15);
+        }
+        assert_eq!(atomic_occupations(&[-0.5, 0.3], 1), vec![1.0, 0.0]);
+        assert!((atomic_occupations(&eps, 10).iter().sum::<f64>() - 10.0).abs() < 1e-14);
+    }
+
+    #[test]
+    fn atomic_guess_has_the_right_electron_count_and_same_converged_energy() {
+        let mol = Molecule::from_symbols(
+            &["C", "O", "H", "H"],
+            &[[0.0, 0.0, -0.53], [0.0, 0.0, 0.68], [0.0, 0.94, -1.11], [0.0, -0.94, -1.11]],
+            Unit::Angstrom,
+            0,
+        )
+        .unwrap();
+        let basis = Basis::from_name(&mol, "6-31g*").unwrap();
+        let p0 = atomic_density_guess(&mol, &basis, 1e-12).unwrap();
+        // Tr(P S) = number of electrons (theory.typ eq:sad).
+        assert!((p0.dot(&overlap(&basis)) - mol.n_electrons() as f64).abs() < 1e-8);
+        // Symmetric, and zero between different atoms.
+        let ao_atom = basis.ao_atom();
+        for a in 0..basis.nao() {
+            for b in 0..basis.nao() {
+                assert!((p0[(a, b)] - p0[(b, a)]).abs() < 1e-12);
+                if ao_atom[a] != ao_atom[b] {
+                    assert_eq!(p0[(a, b)], 0.0);
+                }
+            }
+        }
+        // The converged result does not depend on the guess, and the atomic guess is the better start.
+        let tight = ScfOptions { error_tolerance: 1e-9, ..Default::default() };
+        let sad = run_scf(&mol, &basis, &mut HartreeFock, &tight).unwrap();
+        let core_opts = ScfOptions { initial_guess: InitialGuess::CoreHamiltonian, ..tight };
+        let core = run_scf(&mol, &basis, &mut HartreeFock, &core_opts).unwrap();
+        assert!((sad.energy - core.energy).abs() < 1e-9, "{} vs {}", sad.energy, core.energy);
+        assert!(sad.iterations <= core.iterations, "{} vs {} iterations", sad.iterations, core.iterations);
     }
 }

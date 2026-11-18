@@ -102,6 +102,47 @@ impl Molecule {
         Molecule::new(atoms, charge)
     }
 
+    /// Reads a molecule in XYZ format: the atom count, a comment line, then one
+    /// `symbol x y z` line per atom, coordinates in Ångström.
+    ///
+    /// XYZ has no field for the charge, so it is taken from a `charge=N` token in
+    /// the comment line when there is one (e.g. `charge=-1 acetate`) and is 0 otherwise.
+    /// Extra columns after the coordinates and blank lines after the last atom are ignored.
+    pub fn from_xyz(text: &str) -> Result<Self> {
+        let mut lines = text.lines();
+        let first = lines.next().ok_or_else(|| QcError::Parse("XYZ: empty input".into()))?;
+        let n: usize =
+            first.trim().parse().map_err(|_| QcError::Parse(format!("XYZ: bad atom count '{}'", first.trim())))?;
+        let comment = lines.next().ok_or_else(|| QcError::Parse("XYZ: missing comment line".into()))?;
+        let mut charge = 0;
+        for token in comment.split_whitespace() {
+            if let Some(value) = token.strip_prefix("charge=") {
+                charge = value.parse().map_err(|_| QcError::Parse(format!("XYZ: bad charge '{value}'")))?;
+            }
+        }
+        let mut symbols = Vec::with_capacity(n);
+        let mut coords = Vec::with_capacity(n);
+        for i in 0..n {
+            let line = lines.next().ok_or_else(|| QcError::Parse(format!("XYZ: expected {n} atoms, found {i}")))?;
+            let mut fields = line.split_whitespace();
+            let symbol = fields.next().ok_or_else(|| QcError::Parse(format!("XYZ: empty line for atom {}", i + 1)))?;
+            let mut xyz = [0.0; 3];
+            for x in &mut xyz {
+                *x = fields
+                    .next()
+                    .and_then(|f| f.parse::<f64>().ok())
+                    .filter(|v| v.is_finite())
+                    .ok_or_else(|| QcError::Parse(format!("XYZ: bad coordinates for atom {}: '{line}'", i + 1)))?;
+            }
+            symbols.push(symbol);
+            coords.push(xyz);
+        }
+        if let Some(extra) = lines.find(|l| !l.trim().is_empty()) {
+            return Err(QcError::Parse(format!("XYZ: unexpected line after {n} atoms: '{extra}'")));
+        }
+        Molecule::from_symbols(&symbols, &coords, Unit::Angstrom, charge)
+    }
+
     /// The atoms.
     pub fn atoms(&self) -> &[Atom] {
         &self.atoms
@@ -163,6 +204,37 @@ mod tests {
         assert_eq!(atomic_number("Ar"), Some(18));
         assert_eq!(atomic_number("K"), None);
         assert_eq!(element_symbol(8), Some("O"));
+    }
+
+    #[test]
+    fn xyz_reader() {
+        let text = "3\nwater charge=0\nO 0.0 0.0 0.1173\nH 0.0 0.7572 -0.4692\nH 0.0 -0.7572 -0.4692 extra\n\n";
+        let m = Molecule::from_xyz(text).unwrap();
+        let direct = Molecule::from_symbols(
+            &["O", "H", "H"],
+            &[[0.0, 0.0, 0.1173], [0.0, 0.7572, -0.4692], [0.0, -0.7572, -0.4692]],
+            Unit::Angstrom,
+            0,
+        )
+        .unwrap();
+        assert_eq!(m, direct);
+        // Charge from the comment line; Windows line endings.
+        let ion = Molecule::from_xyz("1\r\nfluoride charge=-1\r\nF 0 0 0\r\n").unwrap();
+        assert_eq!((ion.charge(), ion.n_electrons()), (-1, 10));
+        // No charge token: neutral.
+        assert_eq!(Molecule::from_xyz("1\nMOL\nHe 0 0 0").unwrap().charge(), 0);
+        for bad in [
+            "",
+            "x\nc\nH 0 0 0",
+            "2\nc\nH 0 0 0",
+            "1\nc\nH 0 0",
+            "1\nc\nH 0 a 0",
+            "1\nc\nXx 0 0 0",
+            "1\nc\nH 0 0 0\nH 0 0 1",
+            "1\ncharge=one\nH 0 0 0",
+        ] {
+            assert!(Molecule::from_xyz(bad).is_err(), "accepted {bad:?}");
+        }
     }
 
     #[test]

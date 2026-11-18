@@ -52,4 +52,4 @@ pub use optimize::{OptimizationResult, OptimizationStep, OptimizerSettings, bfgs
 pub use linalg::Matrix;
 pub use molecule::{Atom, Molecule, Unit};
 pub use properties::dipole_moment;
-pub use scf::{EnergyComponents, ExchangeCorrelation, HartreeFock, ScfOptions, ScfResult, XcTerm, run_rhf, run_scf};
+pub use scf::{EnergyComponents, ExchangeCorrelation, HartreeFock, InitialGuess, ScfOptions, ScfResult, XcTerm, run_rhf, run_scf};

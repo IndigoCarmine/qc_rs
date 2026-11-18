@@ -25,8 +25,14 @@
 //! and take the `min` time. Run it when no other jobs are running: a concurrent build
 //! or calculation can slow a run by up to a factor of two, which the minimum over
 //! repeats only partly removes.
+//!
+//! For a DFT energy the time spent in the phases of the XC integration (summed over
+//! the SCF iterations of the last run) is printed after the J/K statistics.
 
-use qc_rs::{Calculation, IntegralStrategy, Molecule, ScfOptions, Unit};
+use qc_rs::dft::XcOptions;
+use qc_rs::{
+    Calculation, GridSettings, IntegralStrategy, MolecularGrid, Molecule, ScfOptions, Unit, XcIntegrator, run_scf,
+};
 use std::time::Instant;
 
 fn builtin(name: &str) -> Option<Molecule> {
@@ -80,7 +86,7 @@ fn main() -> qc_rs::Result<()> {
     opts.incremental_fock = !args.iter().any(|a| a == "--no-incremental");
     let calc = Calculation::new(&mol, &method, &basis)?
         .with_cartesian_d(args.iter().any(|a| a == "--cart"))
-        .with_scf_options(opts);
+        .with_scf_options(opts.clone());
     let repeat: usize = value("--repeat").map_or(1, |n| n.parse().expect("--repeat takes a positive integer"));
     assert!(repeat >= 1, "--repeat takes a positive integer");
     let mut times = Vec::with_capacity(repeat);
@@ -89,14 +95,24 @@ fn main() -> qc_rs::Result<()> {
         let t0 = Instant::now();
         result = Some(if args.iter().any(|a| a == "--gradient") {
             let g = calc.gradient()?;
-            (g.energy, g.scf)
+            (g.energy, g.scf, None)
         } else {
-            let sp = calc.energy()?;
-            (sp.energy, sp.scf)
+            // The same steps as `Calculation::energy` (default grid, default XC
+            // options), done here to keep the integrator and read its phase times.
+            let basis = calc.basis_for(&mol)?;
+            let grid = if calc.functional().has_density_part() {
+                MolecularGrid::new(&mol, GridSettings::default())?
+            } else {
+                MolecularGrid { points: vec![], weights: vec![], blocks: vec![], settings: GridSettings::default() }
+            };
+            let mut xc = XcIntegrator::with_grid(&basis, calc.functional(), grid, XcOptions::default())?;
+            let scf = run_scf(&mol, &basis, &mut xc, &opts)?;
+            let xc_times = calc.functional().has_density_part().then(|| xc.phase_times());
+            (scf.energy, scf, xc_times)
         });
         times.push(t0.elapsed().as_secs_f64());
     }
-    let (energy, scf) = result.expect("at least one run");
+    let (energy, scf, xc_times) = result.expect("at least one run");
     let total = times.iter().copied().fold(f64::INFINITY, f64::min);
     println!(
         "{name} {method}/{basis}{} nao={} threads={} strategy={:?}",
@@ -134,6 +150,25 @@ fn main() -> qc_rs::Result<()> {
                 s.seconds
             );
         }
+    }
+    if let Some(t) = xc_times {
+        let threads = rayon::current_num_threads() as f64;
+        println!(
+            "xc: {} evaluations, {:.2} s parallel loop + {:.2} s block-order sum (wall); AO cache built in {:.2} s",
+            t.evaluations, t.parallel_wall_seconds, t.reduction_seconds, t.ao_cache_seconds
+        );
+        println!("  per-block phases, thread-seconds (÷ {threads} threads ≈ wall):");
+        for (label, s) in [
+            ("AO values (uncached)", t.ao_seconds),
+            ("gather P", t.gather_seconds),
+            ("t = Pχ, ρ, ∇ρ", t.density_seconds),
+            ("functional", t.functional_seconds),
+            ("φ", t.phi_seconds),
+            ("M = χφᵀ, M + Mᵀ", t.products_seconds),
+        ] {
+            println!("  {label:22} {s:9.2} s  ({:.2} s)", s / threads);
+        }
+        println!("  recomputed blocks: {} over all evaluations", t.recomputed_blocks);
     }
     Ok(())
 }

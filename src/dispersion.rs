@@ -2,8 +2,8 @@
 //! coordination number with its nuclear derivatives (eq:d3-cn) and the Gaussian UNCHECKED(Grimme2010) UNCHECKED(Pyykko2009)
 //! interpolation of C6 with its derivatives with respect to the coordination
 //! numbers (eq:d3-c6), the damping parameters of D3(BJ) and D3(0) and the UNCHECKED(Grimme2010)
-//! two-body dispersion energy (eq:d3-e, eq:d3-c8, eq:d3-bj, eq:d3-zero). The UNCHECKED(Grimme2010) UNCHECKED(Grimme2011) UNCHECKED(Johnson2005)
-//! gradient is not implemented here yet.
+//! two-body dispersion energy (eq:d3-e, eq:d3-c8, eq:d3-bj, eq:d3-zero) with its UNCHECKED(Grimme2010) UNCHECKED(Grimme2011) UNCHECKED(Johnson2005)
+//! nuclear gradient (eq:d3-grad).
 
 use crate::error::{QcError, Result};
 use crate::molecule::{Atom, Molecule, element_symbol};
@@ -323,6 +323,7 @@ pub enum D3Damping {
 
 /// Which damping to take from the published parameter tables.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum D3Variant {
     /// D3(BJ).
     Bj,
@@ -386,29 +387,41 @@ impl D3Parameters {
     }
 }
 
-/// Two-body energy e_AB of one atom pair at distance `r` (theory.typ eq:d3-e),
-/// with C8 from eq:d3-c8 and the damping of eq:d3-bj or eq:d3-zero. `r0_zero` is
-/// the tabulated R0^AB, used by zero damping only.
-fn pair_energy(damping: &D3Damping, c6: f64, r4r2_a: f64, r4r2_b: f64, r0_zero: f64, r: f64) -> f64 {
+/// Two-body energy e_AB of one atom pair at distance `r` (theory.typ eq:d3-e) and
+/// its derivative ∂e_AB/∂r at fixed C6 (gradient section, the equation before
+/// eq:d3-grad), with C8 from eq:d3-c8 and the damping of eq:d3-bj or eq:d3-zero.
+/// The tabulated R0^AB is looked up for zero damping only.
+fn pair_energy(damping: &D3Damping, data: &D3Data, za: u32, zb: u32, c6: f64, r: f64) -> Result<(f64, f64)> {
     // eq:d3-c8: C8 = 3 C6 sqrt(Q_A Q_B), with r4r2 = sqrt(Q).
-    let q = 3.0 * r4r2_a * r4r2_b;
+    let q = 3.0 * data.r4r2(za)? * data.r4r2(zb)?;
     let c8 = c6 * q;
     let (r2, r6) = (r * r, r.powi(6));
     let r8 = r6 * r2;
-    match *damping {
+    Ok(match *damping {
         D3Damping::Bj { s6, a1, s8, a2 } => {
             // eq:d3-bj: R0 = sqrt(C8 / C6) = sqrt(q), independent of the CN.
             let rd = a1 * q.sqrt() + a2;
             let rd6 = rd.powi(6);
-            -(s6 * c6 / (r6 + rd6) + s8 * c8 / (r8 + rd6 * rd * rd))
+            let (den6, den8) = (r6 + rd6, r8 + rd6 * rd * rd);
+            let e = -(s6 * c6 / den6 + s8 * c8 / den8);
+            // ∂e/∂r = Σ_n s_n C_n n r^(n-1) / (r^n + R^n)^2.
+            let de = s6 * c6 * 6.0 * r6 / r / (den6 * den6) + s8 * c8 * 8.0 * r8 / r / (den8 * den8);
+            (e, de)
         }
         D3Damping::Zero { s6, sr6, s8, sr8, alpha6 } => {
-            // eq:d3-zero: f_n = 1 / (1 + 6 (r / (s_r,n R0))^(-α_n)), α8 = α6 + 2.
-            let f6 = 1.0 / (1.0 + 6.0 * (r / (sr6 * r0_zero)).powf(-alpha6));
-            let f8 = 1.0 / (1.0 + 6.0 * (r / (sr8 * r0_zero)).powf(-(alpha6 + 2.0)));
-            -(s6 * c6 / r6 * f6 + s8 * c8 / r8 * f8)
+            // eq:d3-zero: f_n = 1 / (1 + 6 t_n^(-α_n)), t_n = r / (s_r,n R0), α8 = α6 + 2.
+            let r0 = data.r0ab(za, zb)?;
+            let alpha8 = alpha6 + 2.0;
+            let (p6, p8) = ((r / (sr6 * r0)).powf(-alpha6), (r / (sr8 * r0)).powf(-alpha8));
+            let f6 = 1.0 / (1.0 + 6.0 * p6);
+            let f8 = 1.0 / (1.0 + 6.0 * p8);
+            let e = -(s6 * c6 / r6 * f6 + s8 * c8 / r8 * f8);
+            // ∂e/∂r = Σ_n s_n C_n f_n / r^(n+1) [n - 6 α_n t_n^(-α_n) f_n].
+            let de = s6 * c6 * f6 / (r6 * r) * (6.0 - 6.0 * alpha6 * p6 * f6)
+                + s8 * c8 * f8 / (r8 * r) * (8.0 - 6.0 * alpha8 * p8 * f8);
+            (e, de)
         }
-    }
+    })
 }
 
 /// DFT-D3 dispersion energy in Hartree (theory.typ eq:d3-e), summed over all atom
@@ -419,16 +432,62 @@ pub fn dispersion_energy(mol: &Molecule, params: &D3Parameters) -> Result<f64> {
     let cn = data.coordination_numbers(atoms)?.cn;
     let mut energy = 0.0;
     for a in 0..atoms.len() {
-        let (za, ra) = (atoms[a].z, data.r4r2(atoms[a].z)?);
+        let za = atoms[a].z;
         for b in 0..a {
             let zb = atoms[b].z;
             let d: [f64; 3] = std::array::from_fn(|k| atoms[a].position[k] - atoms[b].position[k]);
             let r = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
             let c6 = data.c6(za, zb, cn[a], cn[b])?.c6;
-            energy += pair_energy(&params.damping, c6, ra, data.r4r2(zb)?, data.r0ab(za, zb)?, r);
+            energy += pair_energy(&params.damping, data, za, zb, c6, r)?.0;
         }
     }
     Ok(energy)
+}
+
+/// DFT-D3 dispersion energy in Hartree and its gradient dE/dR_A in Hartree/Bohr
+/// (one entry per atom), theory.typ eq:d3-grad. The energy is the same number as
+/// [`dispersion_energy`] returns (same pairs, same order, same arithmetic).
+pub fn dispersion_energy_and_gradient(mol: &Molecule, params: &D3Parameters) -> Result<(f64, Vec<[f64; 3]>)> {
+    let data = d3_data()?;
+    let atoms = mol.atoms();
+    let n = atoms.len();
+    let cn = data.coordination_numbers(atoms)?;
+    let mut energy = 0.0;
+    let mut gradient = vec![[0.0; 3]; n];
+    // D_A = ∂E/∂CN_A = Σ_B (e_AB / C6^AB) ∂C6^AB/∂CN_A (gradient section of sec:d3).
+    let mut de_dcn = vec![0.0; n];
+    for a in 0..n {
+        let za = atoms[a].z;
+        for b in 0..a {
+            let zb = atoms[b].z;
+            let d: [f64; 3] = std::array::from_fn(|k| atoms[a].position[k] - atoms[b].position[k]);
+            let r = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+            let c6 = data.c6(za, zb, cn.cn[a], cn.cn[b])?;
+            let (e, de_dr) = pair_energy(&params.damping, data, za, zb, c6.c6, r)?;
+            energy += e;
+            // e_AB is linear in C6 (R0 does not depend on the CN): ∂e/∂C6 = e / C6.
+            let de_dc6 = e / c6.c6;
+            de_dcn[a] += de_dc6 * c6.dc6_dcn_a;
+            de_dcn[b] += de_dc6 * c6.dc6_dcn_b;
+            // Direct term of eq:d3-grad: ∂e/∂r (R_A - R_B) / r.
+            for k in 0..3 {
+                let v = de_dr * d[k] / r;
+                gradient[a][k] += v;
+                gradient[b][k] -= v;
+            }
+        }
+    }
+    // CN term of eq:d3-grad: Σ_A D_A dCN_A/dR_C. dCN_A/dR_C is built from the same
+    // dg_AB/dr, so this equals Σ_B (D_A + D_B) dg_AB/dr (R_A - R_B) / r.
+    for (a, &da) in de_dcn.iter().enumerate() {
+        for (c, g) in gradient.iter_mut().enumerate() {
+            let dcn = &cn.dcn_dr[a * n + c];
+            for k in 0..3 {
+                g[k] += da * dcn[k];
+            }
+        }
+    }
+    Ok((energy, gradient))
 }
 
 #[cfg(test)]

@@ -928,6 +928,11 @@ $ H_(i j) = (g_i (vb(x) + h vb(e)_j) - g_i (vb(x) - h vb(e)_j)) / (2 h), quad h 
 勾配の誤差を $epsilon$ とすると、差分による誤差は $epsilon slash h$ 程度である。
 勾配を計算する SCF は $max abs(e_(mu nu)) < 10^(-10)$ まで収束させる（@sec:grad）ので $epsilon tilde 10^(-10)$ 程度と見込み、
 $h = 5 times 10^(-3)$ では $epsilon slash h tilde 2 times 10^(-8) thin E_h slash a_0^2$、打ち切り誤差は $h^2 slash 6 approx 4 times 10^(-6)$ に3階微分を掛けたものとなる。
+実測では打ち切り誤差のほうが支配的である。水/STO-3G の RHF（勾配用の SCF 収束条件 $max abs(e_(mu nu)) < 10^(-10)$）で
+$h = 10^(-2), 5 times 10^(-3), 2.5 times 10^(-3), 1.25 times 10^(-3) thin a_0$ と変えると、
+非対称性 $delta_"asym"$（@eq:hess-sym）は $3.43 times 10^(-5), 8.57 times 10^(-6), 2.14 times 10^(-6), 5.35 times 10^(-7) thin E_h slash a_0^2$ となり、
+$h$ を半分にするたびにちょうど $1 slash 4$ になる。SCF の収束条件を $10^(-10)$ から $10^(-12)$ に締めても4桁目しか変わらない。
+つまり HF の既定の $h$ では誤差は $O(h^2)$ で、$epsilon slash h$ の項は見えない。
 DFT では格子による勾配の誤差が加わる。$h$ は利用者が変更できるようにする。
 （この式と誤差の見積もりは差分の定義から導いたもので、文献の式ではない。）
 
@@ -939,6 +944,14 @@ $ H <- 1/2 (H + H^T), quad delta_"asym" = max_(i j) abs(H_(i j) - H_(j i)) $ <eq
 
 DFT では格子の重みの核座標依存性を無視している（@eq:xc-grad）ので、勾配はエネルギーの厳密な微分ではなく、
 $delta_"asym"$ は格子が粗いほど大きくなる。並進不変性 $sum_A H_(A_x, j) = 0$ も同じ理由で近似的にしか成り立たない。
+
+HF でも並進不変性は打ち切り誤差の範囲でしか成り立たない。勾配はどの構造でも $sum_A dif E slash dif vb(R)_A = vb(0)$ を満たすので、
+対称化する前の $H$ の各列は $sum_A H_(A_x, j) = 0$ を $epsilon slash h$ の範囲で満たす。
+ところが対称化した $H$ の和には転置した側 $sum_A H_(j, A_x)$ も入り、その打ち切り誤差
+$h^2 slash 6 dot partial^3 g_j slash partial x_(A_x)^3$ は $A$ ごとに異なって打ち消し合わない。
+そのため対称化した $H$ の並進の和 $max_(alpha, j) abs(sum_A H_(A_alpha, j))$ も $O(h^2)$ で小さくなるだけである。
+@eq:hess-fd と同じ水/STO-3G の RHF で、$h = 10^(-2), 5 times 10^(-3), 2.5 times 10^(-3), 1.25 times 10^(-3) thin a_0$ に対し
+$5.78 times 10^(-6), 1.45 times 10^(-6), 3.61 times 10^(-7), 9.03 times 10^(-8) thin E_h slash a_0^2$ であった（$h$ を半分にするたびに $1 slash 4$）。
 並進・回転の成分は @eq:tr-vectors で取り除く。
 
 == 質量加重

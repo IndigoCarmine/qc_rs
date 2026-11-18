@@ -322,6 +322,13 @@ struct GradPrim {
     /// `e[(set * n1 + i) * ncomp + comp]`, n1 = n_hermite(lab + 1); contraction and
     /// normalization factors d̃_a d̃_b c_a c_b included.
     e: Vec<f64>,
+    /// For a pair with lab <= `GRAD_SMALL_LAB` (empty otherwise), the entries of `e`
+    /// that [`quartet_gradient_small`] reads when the pair is the ket, transposed so
+    /// that one component's coefficients are contiguous:
+    /// `et[comp * w + j] = e[j * ncomp + comp]` (value set, j < n_hermite(lab)) and
+    /// `et[comp * w + nj + k * n1 + j] = e[((1 + k) * n1 + j) * ncomp + comp]` (∂/∂A_k,
+    /// j < n1), with nj = n_hermite(lab) and w = nj + 3 n1.
+    et: Vec<f64>,
 }
 
 /// A shell pair (a >= b) prepared for the derivative-ERI contraction.
@@ -391,7 +398,18 @@ impl GradPair {
                     }
                 }
                 if emax > 1e-30 {
-                    prims.push(GradPrim { p: pair.p, center: pair.center, e });
+                    let mut et = Vec::new();
+                    if lab <= GRAD_SMALL_LAB {
+                        let nj = n_hermite(lab);
+                        et.reserve(ncomp * (nj + 3 * n1));
+                        for comp in 0..ncomp {
+                            et.extend((0..nj).map(|j| e[j * ncomp + comp]));
+                            for k in 0..3 {
+                                et.extend((0..n1).map(|j| e[((1 + k) * n1 + j) * ncomp + comp]));
+                            }
+                        }
+                    }
+                    prims.push(GradPrim { p: pair.p, center: pair.center, e, et });
                 }
             }
         }
@@ -680,20 +698,37 @@ fn quartet_gradient_small<
     let mut gab = [[0.0; 3]; 2];
     let mut gc = [0.0; 3];
     for pc in &cd.prims {
-        // Z_v and Z_C for this ket primitive pair.
+        // Z_v and Z_C for this ket primitive pair. For each ab, all NJ + 3 NJ1 sums
+        // Σ_cd G[ab][cd] E[cd] are accumulated together over cd from the transposed
+        // coefficients `et` (contiguous per cd), as independent add chains. Each is
+        // the same fold as `dot(grow, e)` (start -0.0, add g·e in cd order), so the
+        // values are bit-identical to separate dots.
+        let w = NJ + 3 * NJ1;
+        debug_assert!(pc.et.len() == ncd * w);
         let zv = &mut b.zv[..nab * NJ];
         let zc = &mut b.zc[..3 * nab * NJ1];
-        for (j, &sign) in signs.iter().enumerate() {
-            let ev = &pc.e[j * ncd..(j + 1) * ncd];
-            for a in 0..nab {
-                let grow = &g[a * ncd..(a + 1) * ncd];
-                if j < NJ {
-                    zv[a * NJ + j] = sign * dot(grow, ev);
+        for a in 0..nab {
+            let grow = &g[a * ncd..(a + 1) * ncd];
+            let mut accv = [-0.0f64; NJ];
+            let mut accc = [[-0.0f64; NJ1]; 3];
+            for (&gv, et) in grow.iter().zip(pc.et.chunks_exact(w)) {
+                let (ev, ec) = et.split_at(NJ);
+                for (sum, &e) in accv.iter_mut().zip(ev) {
+                    *sum += gv * e;
                 }
-                for k in 0..3 {
-                    // The C derivative of (cd) is the "A" (first-centre) set of the pair.
-                    let ec = &pc.e[((1 + k) * NJ1 + j) * ncd..((1 + k) * NJ1 + j + 1) * ncd];
-                    zc[(k * nab + a) * NJ1 + j] = sign * dot(grow, ec);
+                // The C derivative of (cd) is the "A" (first-centre) set of the pair.
+                for (acck, eck) in accc.iter_mut().zip(ec.as_chunks::<NJ1>().0) {
+                    for (sum, &e) in acck.iter_mut().zip(eck) {
+                        *sum += gv * e;
+                    }
+                }
+            }
+            for ((z, &sum), &sign) in zv[a * NJ..(a + 1) * NJ].iter_mut().zip(&accv).zip(&signs) {
+                *z = sign * sum;
+            }
+            for (k, acck) in accc.iter().enumerate() {
+                for ((z, &sum), &sign) in zc[(k * nab + a) * NJ1..(k * nab + a + 1) * NJ1].iter_mut().zip(acck).zip(&signs) {
+                    *z = sign * sum;
                 }
             }
         }

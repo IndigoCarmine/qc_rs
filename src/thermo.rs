@@ -93,6 +93,23 @@ pub struct Thermochemistry {
     pub n_excluded_modes: usize,
 }
 
+/// Checks T > 0, p > 0 (finite) and σ ≥ 1, as [`thermochemistry`] does; used to fail
+/// before an expensive Hessian.
+pub(crate) fn check_settings(settings: &ThermoSettings) -> Result<()> {
+    let t = settings.temperature;
+    let p = settings.pressure;
+    if !(t.is_finite() && t > 0.0) {
+        return Err(QcError::InvalidInput(format!("temperature must be finite and positive, got {t}")));
+    }
+    if !(p.is_finite() && p > 0.0) {
+        return Err(QcError::InvalidInput(format!("pressure must be finite and positive, got {p}")));
+    }
+    if settings.symmetry_number == 0 {
+        return Err(QcError::InvalidInput("symmetry number must be at least 1".into()));
+    }
+    Ok(())
+}
+
 /// Thermochemistry of `mol` (theory.typ eq:thermo-total) from its harmonic
 /// wavenumbers `frequencies_cm1` (cm⁻¹, imaginary as negative, 3 N − n_tr of them as
 /// returned by [`crate::harmonic_analysis`]) and electronic energy `electronic_energy`
@@ -107,17 +124,9 @@ pub fn thermochemistry(
     electronic_energy: f64,
     settings: &ThermoSettings,
 ) -> Result<Thermochemistry> {
+    check_settings(settings)?;
     let t = settings.temperature;
     let p = settings.pressure;
-    if !(t.is_finite() && t > 0.0) {
-        return Err(QcError::InvalidInput(format!("temperature must be finite and positive, got {t}")));
-    }
-    if !(p.is_finite() && p > 0.0) {
-        return Err(QcError::InvalidInput(format!("pressure must be finite and positive, got {p}")));
-    }
-    if settings.symmetry_number == 0 {
-        return Err(QcError::InvalidInput("symmetry number must be at least 1".into()));
-    }
     if !electronic_energy.is_finite() {
         return Err(QcError::InvalidInput(format!("electronic energy must be finite, got {electronic_energy}")));
     }

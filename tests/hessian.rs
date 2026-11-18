@@ -1,11 +1,11 @@
 //! Numerical Hessian of `Calculation::hessian` (theory.typ eq:hess-fd, eq:hess-sym)
 //! checked against second differences of the energy, translational invariance and
-//! the DFT-D3 part.
+//! the DFT-D3 part; and `Calculation::frequencies` built on it.
 
 use qc_rs::dispersion::dispersion_energy_and_gradient;
 use qc_rs::{
-    Calculation, D3Damping, D3Parameters, DEFAULT_HESSIAN_STEP, Molecule, QcError, ScfOptions, Unit,
-    central_difference_hessian,
+    Calculation, D3Damping, D3Parameters, D3Variant, DEFAULT_HESSIAN_STEP, FrequencySettings, Molecule, QcError,
+    ScfOptions, ThermoSettings, Unit, central_difference_hessian, harmonic_analysis, thermochemistry,
 };
 
 fn h2() -> Molecule {
@@ -133,5 +133,74 @@ fn invalid_step_is_an_error() {
     let calc = Calculation::new(&h2(), "hf", "sto-3g").unwrap();
     for h in [0.0, -1e-3, f64::NAN] {
         assert!(matches!(calc.hessian(h), Err(QcError::InvalidInput(_))), "{h}");
+    }
+}
+
+/// `frequencies()` with DFT-D3 (B3LYP-D3(BJ)/STO-3G, H2): the Hessian is that of the
+/// total energy, and the thermochemistry uses E_el = E_SCF + E_disp (theory.typ
+/// eq:thermo-total, eq:d3-total) with the wavenumbers of that Hessian.
+#[test]
+fn frequencies_include_dispersion() {
+    let mol = h2();
+    let plain = Calculation::new(&mol, "b3lyp", "sto-3g").unwrap();
+    let with_d3 = plain.clone().with_dispersion(D3Variant::Bj).unwrap();
+    let settings = FrequencySettings::default();
+    let r = with_d3.frequencies(&settings).unwrap();
+    let r0 = plain.frequencies(&settings).unwrap();
+    let g = with_d3.gradient().unwrap();
+    let e_disp = g.dispersion_energy.unwrap();
+    assert!(e_disp.abs() > 1e-5, "E_disp too small to test: {e_disp:e}");
+
+    assert!((r.hessian.energy - (g.scf.energy + e_disp)).abs() < 1e-10);
+    assert_eq!(r.thermo.electronic_energy, r.hessian.energy);
+    let de = r.thermo.electronic_energy - r0.thermo.electronic_energy;
+    assert!((de - e_disp).abs() < 1e-10, "ΔE_el = {de:e}, E_disp = {e_disp:e}");
+    assert_eq!(r.analysis, harmonic_analysis(&mol, &r.hessian.hessian, None).unwrap());
+    let direct = thermochemistry(&mol, None, &r.analysis.frequencies_cm1, r.hessian.energy, &settings.thermo).unwrap();
+    assert_eq!(r.thermo, direct);
+    // H and G move by E_disp plus the (small) change of the vibrational terms.
+    let d_vib = r.thermo.vibration.energy - r0.thermo.vibration.energy;
+    let dh = r.thermo.enthalpy - r0.thermo.enthalpy;
+    assert!((dh - e_disp - d_vib).abs() < 1e-10, "ΔH = {dh:e}");
+    let dw = (r.analysis.frequencies_cm1[0] - r0.analysis.frequencies_cm1[0]).abs();
+    assert!(dw > 1e-3, "D3 does not change the H2 wavenumber: {dw:e} cm⁻¹");
+    let g_max = g.gradient.iter().flatten().fold(0.0_f64, |m, x| m.max(x.abs()));
+    assert!((r.max_abs_gradient - g_max).abs() < 1e-10, "{} vs {g_max}", r.max_abs_gradient);
+}
+
+/// User masses reach both the harmonic analysis and the thermochemistry.
+#[test]
+fn frequencies_use_given_masses() {
+    let mol = h2();
+    let calc = Calculation::new(&mol, "hf", "sto-3g").unwrap();
+    let masses = vec![2.014101778, 2.014101778]; // D2
+    let settings = FrequencySettings { masses: Some(masses.clone()), ..FrequencySettings::default() };
+    let r = calc.frequencies(&settings).unwrap();
+    assert_eq!(r.analysis, harmonic_analysis(&mol, &r.hessian.hessian, Some(&masses)).unwrap());
+    let direct =
+        thermochemistry(&mol, Some(&masses), &r.analysis.frequencies_cm1, r.hessian.energy, &settings.thermo).unwrap();
+    assert_eq!(r.thermo, direct);
+    let h = harmonic_analysis(&mol, &r.hessian.hessian, None).unwrap();
+    let ratio = r.analysis.frequencies_cm1[0] / h.frequencies_cm1[0];
+    assert!((ratio - (1.008_f64 / 2.014101778).sqrt()).abs() < 1e-10, "ν(D2)/ν(H2) = {ratio}");
+}
+
+/// Invalid steps, masses and thermochemistry settings are errors.
+#[test]
+fn invalid_frequency_settings_are_errors() {
+    let calc = Calculation::new(&h2(), "hf", "sto-3g").unwrap();
+    let d = FrequencySettings::default;
+    let thermo = ThermoSettings::default;
+    let bad = [
+        FrequencySettings { step: 0.0, ..d() },
+        FrequencySettings { step: f64::NAN, ..d() },
+        FrequencySettings { masses: Some(vec![1.008]), ..d() },
+        FrequencySettings { masses: Some(vec![1.008, -1.0]), ..d() },
+        FrequencySettings { thermo: ThermoSettings { symmetry_number: 0, ..thermo() }, ..d() },
+        FrequencySettings { thermo: ThermoSettings { temperature: 0.0, ..thermo() }, ..d() },
+        FrequencySettings { thermo: ThermoSettings { pressure: f64::NAN, ..thermo() }, ..d() },
+    ];
+    for s in bad {
+        assert!(matches!(calc.frequencies(&s), Err(QcError::InvalidInput(_))), "{s:?}");
     }
 }

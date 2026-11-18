@@ -1,7 +1,7 @@
 # qc_rs
 
 Gauss 基底による閉殻 Hartree–Fock（RHF）と Kohn–Sham DFT（RKS）の Rust 実装です。
-1点エネルギー・解析的エネルギー勾配・構造最適化ができ、分散補正 DFT-D3（BJ・ゼロ減衰）を加えられます。依存クレートは `rayon`（並列化）だけです。
+1点エネルギー・解析的エネルギー勾配・構造最適化・調和振動数と熱化学ができ、分散補正 DFT-D3（BJ・ゼロ減衰）を加えられます。依存クレートは `rayon`（並列化）だけです。
 数式はすべて `docs/theory.typ`（理論仕様書）に従い、コード中のコメントは仕様書の式ラベル（`eq:grad` など）を参照しています。
 
 純 Rust で書かれており、C/Fortran のライブラリやシステムの BLAS を必要としません。
@@ -10,7 +10,7 @@ Windows・Linux・macOS のどれでも `cargo build` だけでビルドでき�
 
 ## できること・制限
 
-- 閉殻（電子数が偶数、RHF/RKS）のみ。開殻、ECP、振動数計算はありません。
+- 閉殻（電子数が偶数、RHF/RKS）のみ。開殻、ECP はありません。
 - 元素は H–Ar。基底は STO-3G、6-31G、6-31G\*、6-31G\*\*（殻は d まで、d は既定で球面 5 成分、デカルト 6 成分も可）。
 - 2電子積分の扱いは2通りあります（`ScfOptions::integral_strategy`、`Calculation::with_integral_strategy`）。
   - **保存法**（`IntegralStrategy::Stored`）：8重対称性と Schwarz 選別を使って独立な積分をすべてメモリに保持します。
@@ -37,6 +37,18 @@ Windows・Linux・macOS のどれでも `cargo build` だけでビルドでき�
   - 3体項（Axilrod–Teller–Muto）はなく、距離の打ち切りもしません（全原子対を足す）。D2・D4 もありません。元素は H–Ar。
   - 参照値は dftd3 1.7.0（同じ条件：3体項なし・打ち切りなし）。一致度は下の「PySCF との比較」にあります。
   - B3LYP の D3 パラメータが VWN-RPA 版と VWN5 版のどちらに当てはめられたものかは未確認です（`docs/theory.typ` の分散補正の節）。
+- **振動数解析と熱化学**（`Calculation::frequencies`、`docs/theory.typ` の振動数解析の節）：HF と DFT のすべての汎関数で、分散補正があればそれも含みます。
+  - Hessian は解析的勾配の**中心差分**（数値 Hessian、既定の変位 h = 5×10⁻³ Bohr）で、勾配の計算が 6N + 1 回（N は原子数）要ります。
+    変位は1つずつ順に計算します。解析的 Hessian はありません。誤差は h² に比例し（HCN の C≡N 伸縮で Hessian 要素 8e-5 Eh/Bohr² 程度、振動数では 0.1 cm⁻¹ 未満）、
+    `FrequencySettings::step` で変えられます。
+  - 質量加重・並進と回転の除去・対角化で調和振動数（cm⁻¹）・基準振動・換算質量を求めます。質量の既定は標準原子量で、原子ごとに与えることもできます（同位体）。
+  - 規約：振動数は昇順、**虚数振動数は負の数**で表し、熱化学から除きます（除いた数は `Thermochemistry::n_excluded_modes`）。
+    基準振動は質量加重の単位ベクトルで、符号と縮退した振動の基底は任意です。
+  - 振動数は**停留点**（最適化した構造）でだけ意味を持ちます。基準構造の勾配の大きさを `FrequencyResult::max_abs_gradient` で確かめてください。
+  - 熱化学は理想気体・剛体回転子・調和振動子の近似（零点エネルギー、U、H、S、G、C_v、C_p。1分子あたり、Eh と Eh/K）で、
+    電子エネルギーは基準構造の全エネルギー（分散補正を含む）です。
+  - 制限：**回転の対称数は自動で判定しません**（`ThermoSettings::symmetry_number`、既定 1。H2O は 2、NH3 は 3 などを自分で与える）。
+    低振動数の補正（qRRHO など）はなく、電子状態の縮重度は 1 に固定です。IR 強度はまだ計算できません。
 
 ## 使い方
 
@@ -66,6 +78,40 @@ fn main() -> qc_rs::Result<()> {
     Ok(())
 }
 ```
+
+振動数と熱化学は、最適化した構造で `frequencies` を呼びます（6N + 1 回の勾配。下は STO-3G の水なので一瞬で終わります）：
+
+```rust
+use qc_rs::{Calculation, FrequencySettings, Molecule, OptimizerSettings, ThermoSettings, Unit};
+
+fn main() -> qc_rs::Result<()> {
+    let mol = Molecule::from_symbols(
+        &["O", "H", "H"],
+        &[[0.0, 0.0, 0.12], [0.0, 0.76, -0.47], [0.0, -0.76, -0.47]],
+        Unit::Angstrom,
+        0,
+    )?;
+    let calc = Calculation::new(&mol, "hf", "sto-3g")?;
+    // 振動数には既定より厳しい収束（max|g| < 1.5e-5 Eh/Bohr）が向く
+    let opt = calc.optimize(&OptimizerSettings::tight())?;
+    let settings = FrequencySettings {
+        // 対称数は自動判定しないので与える（H2O は C2v で 2）。298.15 K、101325 Pa が既定
+        thermo: ThermoSettings { symmetry_number: 2, ..ThermoSettings::default() },
+        ..FrequencySettings::default() // 変位 5e-3 Bohr、標準原子量
+    };
+    let freq = calc.with_molecule(&opt.molecule).frequencies(&settings)?;
+    assert!(freq.max_abs_gradient < 1e-4); // 停留点であることを確かめる
+    println!("振動数 (cm⁻¹, 虚数は負) = {:?}", freq.analysis.frequencies_cm1);
+    let t = &freq.thermo;
+    println!("ZPE = {:.6}, H = {:.6}, G = {:.6} Eh", t.zero_point_energy, t.enthalpy, t.gibbs_energy);
+    assert_eq!(t.n_excluded_modes, 0); // 虚数振動数なし
+    Ok(())
+}
+```
+
+`FrequencyResult` には Hessian（`hessian`、`HessianResult`）、基準振動と換算質量（`analysis`、`HarmonicAnalysis`）、
+熱化学の内訳（`thermo`、`Thermochemistry`）が入ります。Hessian だけなら `Calculation::hessian`、
+自分で用意した Hessian や振動数からは `harmonic_analysis`、`thermochemistry` を直接呼べます。
 
 DFT の格子は `.with_grid(GridSettings::fine())`（既定は 75 × 18 × 36 点/原子）、デカルト d は `.with_cartesian_d(true)`、
 SCF の設定は `.with_scf_options(...)` で変えられます。SCF の初期値は原子密度の重ね合わせです
@@ -197,6 +243,16 @@ RHF/6-31G と B3LYP/6-31G のエネルギーと勾配を PySCF の参照値と�
 | CAM-B3LYP 軌道エネルギー・双極子 | 同上 | 4.1e-8・9.5e-9 |
 | CAM-B3LYP 勾配 | 同上 | 1.5e-6 Eh/Bohr（H2CO。他は 4e-8 以下） |
 | CAM-B3LYP 最適化 | H2O（6-31G、PySCF は 99 × 590 格子） | エネルギー 8.4e-9 Eh、距離 9.2e-7 Bohr |
+| 振動数解析（PySCF の Hessian から） | H2O・NH3・HCN の RHF/6-31G\*、H2O・NH3 の B3LYP/6-31G、H2O の CAM-B3LYP/6-31G | 振動数 1e-3 cm⁻¹ 未満、熱化学 7.1e-11 Eh |
+| 数値 Hessian 要素（`frequencies`、h = 5e-3） | RHF 3件 | 7.6e-5 Eh/Bohr²（HCN。H2O・NH3 は 1.3e-5 以下。h = 1.25e-3 で 4.7e-6） |
+| 数値 Hessian 要素（同、細かい格子） | B3LYP 2件・CAM-B3LYP 1件 | 1.9e-5 Eh/Bohr²（NH3 B3LYP） |
+| 調和振動数（`frequencies`） | 上の6件 | 0.062 cm⁻¹（RHF）、0.057 cm⁻¹（DFT） |
+| ZPE・H・G（`frequencies`） | 同上、298.15 K と 500 K | 3.3e-7 Eh（HCN RHF）、2.4e-7 Eh（NH3 B3LYP） |
+
+`frequencies` の比較（`tests/frequency_pyscf.rs`）は PySCF が最適化した構造で、こちらの SCF・解析的勾配・数値 Hessian を通したものです。
+PySCF の Hessian は解析的なので、数値 Hessian の差は主に中心差分の打ち切り誤差（h² に比例。h を半分にすると差が 1/4 になる）で、
+DFT ではそれに格子の違いと、PySCF の Hessian が格子の応答を含まないことによる 1e-6 Eh/Bohr² 程度の差が加わります。
+熱化学は PySCF の k_B（CODATA 2014 相当）にそろえた温度で比べています（`docs/theory.typ` の熱化学の節）。
 
 PySCF に依存しない検査として、エネルギーの中心差分（h = 1e-3 Bohr）との差は RHF/6-31G\* で 1.5e-7
 （Richardson 外挿で 3e-10）、B3LYP/6-31G の細かい格子で 1.5e-7（同 2.5e-9）、CAM-B3LYP/6-31G の細かい格子で 1.5e-7（同 1.6e-9）、既定の格子で 1.3e-6
@@ -270,6 +326,15 @@ Helgaker, Jørgensen & Olsen *Molecular Electronic-Structure Theory*（Wiley, 20
 - M. Friede, C. Hölzer, S. Ehlert, S. Grimme, *J. Chem. Phys.* **161**, 062501 (2024) — tad-dftd3 / tad-mctc。取り込んだ D3 の数表（H–Ar）の入手元です。
 - 汎関数ごとの減衰パラメータは Grimme 研究室の DFT-D3 公開ページとプログラム説明書（Ver. 3.2 Rev 0, 2016）によります。
 - エネルギー勾配の式（連鎖律）は `docs/theory.typ` で導いたもので、文献の式ではありません。
+
+**振動数解析と熱化学**（`src/hessian.rs`、`src/vibration.rs`、`src/thermo.rs`）
+
+- E. B. Wilson, J. C. Decius, P. C. Cross, *Molecular Vibrations*（McGraw-Hill, 1955; Dover 1980）— 質量加重座標、Eckart 条件、基準振動。
+- J. W. Ochterski, "Vibrational Analysis in Gaussian"（Gaussian, Inc., 1999）— 主慣性軸による並進・回転ベクトルの作り方と振動数の単位換算。
+- J. W. Ochterski, "Thermochemistry in Gaussian"（Gaussian, Inc., 2000）— 理想気体・剛体回転子・調和振動子による熱化学（零点エネルギー、H、G、虚数振動数を除くこと）。
+- D. A. McQuarrie, J. D. Simon, *Molecular Thermodynamics*（University Science Books, 1999）— 分配関数とその熱力学量（上の文書が引く式の出典）。
+- J. Meija ほか, *Pure Appl. Chem.* **88**, 265 (2016) — 既定の質量に使う標準原子量（IUPAC/CIAAW 2013）。
+- Hessian の中心差分とその誤差の見積もりは `docs/theory.typ` で導いたもので、文献の式ではありません。
 
 **基底関数**（`data/basis/`）
 

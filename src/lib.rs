@@ -47,7 +47,9 @@ pub mod thermo;
 pub mod vibration;
 
 pub use basis::{Basis, BasisOptions, BasisSetDefinition};
-pub use calculation::{Calculation, GeometryOptimization, GradientResult, HessianResult, SinglePoint};
+pub use calculation::{
+    Calculation, FrequencyResult, FrequencySettings, GeometryOptimization, GradientResult, HessianResult, SinglePoint,
+};
 pub use dft::{RksResult, XcIntegrator, run_rks};
 pub use direct::{DirectBuildStatistics, DirectJk};
 pub use dispersion::{D3Damping, D3Parameters, D3Variant};

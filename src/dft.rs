@@ -74,19 +74,7 @@ pub fn density_on_points(ao: &AoValues, p: &[f64], gradient: bool) -> (Vec<f64>,
     let (na, np) = (ao.n_ao, ao.n_points);
     assert_eq!(p.len(), na * na);
     let chi = ao.component(0);
-    let mut t = vec![0.0; na * np];
-    for a in 0..na {
-        let ta = &mut t[a * np..(a + 1) * np];
-        for b in 0..na {
-            let pab = p[a * na + b];
-            if pab == 0.0 {
-                continue;
-            }
-            for (o, c) in ta.iter_mut().zip(&chi[b * np..(b + 1) * np]) {
-                *o += pab * c;
-            }
-        }
-    }
+    let t = density_times_ao(p, chi, na, np);
     let mut rho = vec![0.0; np];
     for a in 0..na {
         for ((r, c), tv) in rho.iter_mut().zip(&chi[a * np..(a + 1) * np]).zip(&t[a * np..(a + 1) * np]) {
@@ -130,23 +118,175 @@ pub fn xc_on_points(functional: &Functional, rho: Vec<f64>, grad: Vec<[f64; 3]>)
     PointData { rho, grad_rho: grad, f, v_rho: vr, v_sigma: vs }
 }
 
-/// Σ_g a_g · b_g with independent partial sums (lets the compiler vectorize).
-#[inline]
-fn dot(a: &[f64], b: &[f64]) -> f64 {
+/// Rows (TR) and columns (TC) of the register tiles of [`density_times_ao`] and
+/// [`ao_products`]: TR·TC = 32 accumulators, 8 AVX registers.
+const TR: usize = 8;
+const TC: usize = 4;
+/// Independent partial sums per point index in [`ao_products`] (point g goes to
+/// lane g mod LANES; the last np mod LANES points are added afterwards in order).
+const LANES: usize = 8;
+
+/// C_ij = Σ_l a_l[i] b_l[j], accumulated from 0.0 in the order of l. Each output
+/// element sees exactly the scalar sequence `c += a·b`, so the result does not
+/// depend on the tiling; the accumulators stay in registers.
+#[inline(always)]
+fn tile_product(a: &[[f64; TR]], b: &[[f64; TC]]) -> [[f64; TC]; TR] {
     debug_assert_eq!(a.len(), b.len());
-    let mut acc = [0.0f64; 8];
-    let (ca, ra) = a.as_chunks::<8>();
-    let (cb, rb) = b.as_chunks::<8>();
-    for (x, y) in ca.iter().zip(cb) {
-        for k in 0..8 {
-            acc[k] += x[k] * y[k];
+    let mut c = [[0.0f64; TC]; TR];
+    for (x, y) in a.iter().zip(b) {
+        for i in 0..TR {
+            for j in 0..TC {
+                c[i][j] += x[i] * y[j];
+            }
         }
     }
-    let mut s: f64 = acc.iter().sum();
-    for (x, y) in ra.iter().zip(rb) {
-        s += x * y;
+    c
+}
+
+/// Packs `m` (row-major, `rows × cols`) into column strips of `W` rows:
+/// out[s·cols + l][i] = m[(W·s + i)·cols + l], zero for rows ≥ `rows`.
+#[inline(always)]
+fn pack_row_tiles<const W: usize>(m: &[f64], rows: usize, cols: usize) -> Vec<[f64; W]> {
+    let strips = rows.div_ceil(W);
+    let mut out = vec![[0.0; W]; strips * cols];
+    for r in 0..rows {
+        let (s, i) = (r / W, r % W);
+        for (l, &v) in m[r * cols..(r + 1) * cols].iter().enumerate() {
+            out[s * cols + l][i] = v;
+        }
     }
-    s
+    out
+}
+
+/// Runs `$tiled` compiled for AVX when the CPU has it, else for the baseline target.
+/// Only the vector width changes: AVX `vmulpd`/`vaddpd` round exactly like the SSE2
+/// and scalar instructions, FMA is not enabled, and the order of operations is fixed
+/// by the source, so both paths return the same bits.
+macro_rules! dispatch_avx {
+    ($avx:ident, $tiled:ident, ($($arg:ident: $ty:ty),*)) => {{
+        #[cfg(target_arch = "x86_64")]
+        {
+            #[target_feature(enable = "avx")]
+            fn $avx($($arg: $ty),*) -> Vec<f64> {
+                $tiled($($arg),*)
+            }
+            if std::arch::is_x86_feature_detected!("avx") {
+                // SAFETY: the CPU supports AVX (checked just above).
+                return unsafe { $avx($($arg),*) };
+            }
+        }
+        $tiled($($arg),*)
+    }};
+}
+
+/// t_a(g) = Σ_b P_ab χ_b(g) for row-major `p` (`na × na`) and `chi` (`na × np`),
+/// with the sum over b taken in order from 0.0 for every (a, g). theory.typ eq:rho
+fn density_times_ao(p: &[f64], chi: &[f64], na: usize, np: usize) -> Vec<f64> {
+    dispatch_avx!(density_times_ao_avx, density_times_ao_tiled, (p: &[f64], chi: &[f64], na: usize, np: usize))
+}
+
+/// M_ab = Σ_g x_a(g) y_b(g) for row-major `x`, `y` (`na × np`); see [`ao_products_tiled`].
+fn ao_products(x: &[f64], y: &[f64], na: usize, np: usize) -> Vec<f64> {
+    dispatch_avx!(ao_products_avx, ao_products_tiled, (x: &[f64], y: &[f64], na: usize, np: usize))
+}
+
+/// [`density_times_ao`] with [`TR`]×[`TC`] register tiles.
+///
+/// Terms with P_ab = 0 are not skipped: they add ±0 to a partial sum that is
+/// never −0 (it starts at +0 and a rounded sum is −0 only if both operands are),
+/// which leaves it bit for bit unchanged.
+#[inline(always)]
+fn density_times_ao_tiled(p: &[f64], chi: &[f64], na: usize, np: usize) -> Vec<f64> {
+    let mut t = vec![0.0; na * np];
+    if na == 0 || np == 0 {
+        return t;
+    }
+    // a-strip s: [b][i] = P[TR·s + i, b]; g-strip s: [b][j] = χ_b(TC·s + j).
+    let pa = pack_row_tiles::<TR>(p, na, na);
+    let mut cb = vec![[0.0; TC]; np.div_ceil(TC) * na];
+    for b in 0..na {
+        for (g, &v) in chi[b * np..(b + 1) * np].iter().enumerate() {
+            cb[(g / TC) * na + b][g % TC] = v;
+        }
+    }
+    for (sa, a_strip) in pa.chunks_exact(na).enumerate() {
+        for (sg, g_strip) in cb.chunks_exact(na).enumerate() {
+            let c = tile_product(a_strip, g_strip);
+            for (i, row) in c.iter().enumerate() {
+                let a = sa * TR + i;
+                if a >= na {
+                    break;
+                }
+                let g0 = sg * TC;
+                let n = TC.min(np - g0);
+                t[a * np + g0..a * np + g0 + n].copy_from_slice(&row[..n]);
+            }
+        }
+    }
+    t
+}
+
+/// Packs the first LANES·⌊np/LANES⌋ columns of `m` (row-major, `na × np`) per lane:
+/// out[(s·LANES + k)·nj + j][i] = m[W·s + i, LANES·j + k], zero for rows ≥ `na`.
+#[inline(always)]
+fn pack_lanes<const W: usize>(m: &[f64], na: usize, np: usize) -> Vec<[f64; W]> {
+    let nj = np / LANES;
+    let mut out = vec![[0.0; W]; na.div_ceil(W) * LANES * nj];
+    for r in 0..na {
+        let (s, i) = (r / W, r % W);
+        for (j, chunk) in m[r * np..r * np + nj * LANES].as_chunks::<LANES>().0.iter().enumerate() {
+            for (k, &v) in chunk.iter().enumerate() {
+                out[(s * LANES + k) * nj + j][i] = v;
+            }
+        }
+    }
+    out
+}
+
+/// M_ab = Σ_g x_a(g) y_b(g) for row-major `x`, `y` (`na × np`). The sum keeps
+/// [`LANES`] independent partial sums over g ≡ k (mod LANES) for the first
+/// LANES·⌊np/LANES⌋ points, adds them in lane order to 0.0 and then adds the
+/// remaining points in order. Every lane is a [`tile_product`] over the packed
+/// points of that lane.
+#[inline(always)]
+fn ao_products_tiled(x: &[f64], y: &[f64], na: usize, np: usize) -> Vec<f64> {
+    let mut m = vec![0.0; na * na];
+    if na == 0 {
+        return m;
+    }
+    let nj = np / LANES;
+    let main = nj * LANES;
+    let (px, py) = (pack_lanes::<TR>(x, na, np), pack_lanes::<TC>(y, na, np));
+    let lane = |s: usize, k: usize| (s * LANES + k) * nj..(s * LANES + k + 1) * nj;
+    for sa in 0..na.div_ceil(TR) {
+        for sb in 0..na.div_ceil(TC) {
+            let mut acc = [[[0.0f64; TC]; TR]; LANES];
+            for (k, c) in acc.iter_mut().enumerate() {
+                *c = tile_product(&px[lane(sa, k)], &py[lane(sb, k)]);
+            }
+            // Lane partial sums of every tile element, in lane order.
+            let lanes: [[[f64; LANES]; TC]; TR] =
+                std::array::from_fn(|i| std::array::from_fn(|j| std::array::from_fn(|k| acc[k][i][j])));
+            for (i, lanes_i) in lanes.iter().enumerate() {
+                let a = sa * TR + i;
+                if a >= na {
+                    break;
+                }
+                for (j, lanes_ij) in lanes_i.iter().enumerate() {
+                    let b = sb * TC + j;
+                    if b >= na {
+                        break;
+                    }
+                    let mut s: f64 = lanes_ij.iter().sum();
+                    for (xv, yv) in x[a * np + main..(a + 1) * np].iter().zip(&y[b * np + main..(b + 1) * np]) {
+                        s += xv * yv;
+                    }
+                    m[a * na + b] = s;
+                }
+            }
+        }
+    }
+    m
 }
 
 /// Which shells/AOs are active on one grid block.
@@ -304,12 +444,7 @@ impl XcIntegrator {
                         }
                     }
                 }
-                let mut v = vec![0.0; na * na];
-                for a in 0..na {
-                    for b in 0..na {
-                        v[a * na + b] = dot(&chi[a * np..(a + 1) * np], &phi[b * np..(b + 1) * np]);
-                    }
-                }
+                let v = ao_products(chi, &phi, na, np);
                 let mut vs = vec![0.0; na * na];
                 for a in 0..na {
                     for b in 0..na {
@@ -455,6 +590,78 @@ mod tests {
         let (ea, eb) = (a.evaluate_density(&p), b.evaluate_density(&p));
         assert_eq!(ea.energy, eb.energy);
         assert_eq!(ea.potential, eb.potential);
+    }
+
+    /// Previous row-axpy form of t (skips P_ab = 0).
+    fn reference_t(p: &[f64], chi: &[f64], na: usize, np: usize) -> Vec<f64> {
+        let mut t = vec![0.0; na * np];
+        for a in 0..na {
+            let ta = &mut t[a * np..(a + 1) * np];
+            for b in 0..na {
+                let pab = p[a * na + b];
+                if pab == 0.0 {
+                    continue;
+                }
+                for (o, c) in ta.iter_mut().zip(&chi[b * np..(b + 1) * np]) {
+                    *o += pab * c;
+                }
+            }
+        }
+        t
+    }
+
+    /// Previous per-(a, b) 8-lane dot form of M.
+    fn reference_m(x: &[f64], y: &[f64], na: usize, np: usize) -> Vec<f64> {
+        let dot = |a: &[f64], b: &[f64]| {
+            let mut acc = [0.0f64; 8];
+            let (ca, ra) = a.as_chunks::<8>();
+            let (cb, rb) = b.as_chunks::<8>();
+            for (u, v) in ca.iter().zip(cb) {
+                for k in 0..8 {
+                    acc[k] += u[k] * v[k];
+                }
+            }
+            let mut s: f64 = acc.iter().sum();
+            for (u, v) in ra.iter().zip(rb) {
+                s += u * v;
+            }
+            s
+        };
+        let mut m = vec![0.0; na * na];
+        for a in 0..na {
+            for b in 0..na {
+                m[a * na + b] = dot(&x[a * np..(a + 1) * np], &y[b * np..(b + 1) * np]);
+            }
+        }
+        m
+    }
+
+    #[test]
+    fn tiled_kernels_match_scalar_loops_bitwise() {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            // Mixed signs and magnitudes, with some exact zeros.
+            let u = (state >> 11) as f64 / (1u64 << 53) as f64;
+            if u < 0.1 { 0.0 } else { (2.0 * u - 1.0) * 10f64.powi((state % 9) as i32 - 4) }
+        };
+        for &na in &[1, 3, 4, 5, 8, 13, 22] {
+            for &np in &[0, 1, 3, 7, 8, 9, 16, 37, 101] {
+                let p: Vec<f64> = (0..na * na).map(|_| next()).collect();
+                let x: Vec<f64> = (0..na * np).map(|_| next()).collect();
+                let y: Vec<f64> = (0..na * np).map(|_| next()).collect();
+                let (t, t_ref) = (density_times_ao(&p, &x, na, np), reference_t(&p, &x, na, np));
+                let (m, m_ref) = (ao_products(&x, &y, na, np), reference_m(&x, &y, na, np));
+                let bits = |v: &[f64]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+                assert_eq!(bits(&t), bits(&t_ref), "t: na = {na}, np = {np}");
+                assert_eq!(bits(&m), bits(&m_ref), "M: na = {na}, np = {np}");
+                // The baseline-target build of the same kernels (no AVX dispatch).
+                assert_eq!(bits(&density_times_ao_tiled(&p, &x, na, np)), bits(&t_ref), "t: na = {na}, np = {np}");
+                assert_eq!(bits(&ao_products_tiled(&x, &y, na, np)), bits(&m_ref), "M: na = {na}, np = {np}");
+            }
+        }
     }
 
     #[test]

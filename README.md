@@ -205,3 +205,6 @@ Helgaker, Jørgensen & Olsen *Molecular Electronic-Structure Theory*（Wiley, 20
 ## ライセンス
 
 BSD 3-Clause（`LICENSE` を参照）。
+
+基底関数のデータ（`data/basis/`）だけは qc_rs の著作物ではなく、Basis Set Exchange に帰属します。
+出典・ライセンス・引用すべき文献は [data/basis/README.md](data/basis/README.md) にあります。

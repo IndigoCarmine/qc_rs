@@ -56,6 +56,9 @@ SOURCES = {
     "grad": ["Pulay1969"], "W": ["Pulay1969"], "center-deriv": ["Pulay1969"], "dS": ["Pulay1969"],
     "hf-force": ["Pulay1969"], "gamma": ["Pulay1969"], "xc-grad": ["Johnson1993"],
     "bfgs": ["Fletcher1970"],
+    "d3-e": ["Grimme2010"], "d3-cn": ["Grimme2010", "Pyykko2009"], "d3-c6": ["Grimme2010"],
+    "d3-c8": ["Grimme2010"], "d3-bj": ["Grimme2011", "Johnson2005"], "d3-zero": ["Grimme2010"],
+    "d3-grad": [],  # derived here (chain rule)
 }
 
 FILES = sorted(glob.glob("src/*.rs") + glob.glob("src/functional/*.rs"))

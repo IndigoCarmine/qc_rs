@@ -34,6 +34,7 @@
 
 use crate::ao_eval::{D_X, eval_ao_shells, hessian_component};
 use crate::basis::{Basis, CART_TO_SPH_D, cartesian_components, cartesian_norm};
+use crate::boys::boys;
 use crate::dft::{XcIntegrator, density_on_points, xc_on_points};
 use crate::error::{QcError, Result};
 use crate::hermite::{HermiteR, PrimitivePair, erf_attenuation};
@@ -306,7 +307,7 @@ fn hermite_list(l: usize) -> Vec<[usize; 3]> {
 }
 
 /// Number of (t, u, v) with t+u+v <= l.
-fn n_hermite(l: usize) -> usize {
+const fn n_hermite(l: usize) -> usize {
     (l + 1) * (l + 2) * (l + 3) / 6
 }
 
@@ -398,7 +399,7 @@ impl GradPair {
     }
 }
 
-/// Per-thread scratch buffers of the quartet kernel.
+/// Per-thread scratch buffers of the quartet kernels.
 #[derive(Default)]
 struct QuartetScratch {
     r: HermiteR,
@@ -409,6 +410,160 @@ struct QuartetScratch {
     hv: Vec<f64>,
     q: Vec<f64>,
     gamma: Vec<f64>,
+    /// Buffers of [`quartet_gradient_small`].
+    small: GradSmallBuffers,
+}
+
+/// Largest l_a + l_b of a shell pair served by [`quartet_gradient_small`] (s and p
+/// shells, and s with d), so that its R tables have ltot = l_ab + l_cd + 1 <= 5.
+const GRAD_SMALL_LAB: usize = 2;
+/// dim³ of the largest R table of [`hermite_r_grad_small`] (dim = ltot + 1 <= 6).
+const GRAD_SMALL_CUBE: usize = (2 * GRAD_SMALL_LAB + 2) * (2 * GRAD_SMALL_LAB + 2) * (2 * GRAD_SMALL_LAB + 2);
+/// Most Cartesian components of a pair with l_ab <= GRAD_SMALL_LAB (p × p).
+const GRAD_SMALL_NCOMP: usize = 9;
+/// n_hermite(GRAD_SMALL_LAB) and n_hermite(GRAD_SMALL_LAB + 1).
+const GRAD_SMALL_NH: usize = n_hermite(GRAD_SMALL_LAB);
+const GRAD_SMALL_NH1: usize = n_hermite(GRAD_SMALL_LAB + 1);
+
+/// Fixed-size buffers of [`quartet_gradient_small`]: the R layers of
+/// [`hermite_r_grad_small`] and the Z_v, Z_C, H, Q arrays of [`quartet_gradient_general`]
+/// at their largest size (used with the same runtime layout).
+struct GradSmallBuffers {
+    /// Two R layers; entry `GRAD_SMALL_CUBE` is never written and stays 0.
+    ra: [f64; GRAD_SMALL_CUBE + 1],
+    rb: [f64; GRAD_SMALL_CUBE + 1],
+    f: [f64; 2 * GRAD_SMALL_LAB + 2],
+    zv: [f64; GRAD_SMALL_NCOMP * GRAD_SMALL_NH],
+    zc: [f64; 3 * GRAD_SMALL_NCOMP * GRAD_SMALL_NH1],
+    hv: [f64; GRAD_SMALL_NH1 * GRAD_SMALL_NCOMP],
+    q: [f64; GRAD_SMALL_NCOMP * GRAD_SMALL_NH1],
+}
+
+impl Default for GradSmallBuffers {
+    fn default() -> Self {
+        GradSmallBuffers {
+            ra: [0.0; GRAD_SMALL_CUBE + 1],
+            rb: [0.0; GRAD_SMALL_CUBE + 1],
+            f: [0.0; 2 * GRAD_SMALL_LAB + 2],
+            zv: [0.0; GRAD_SMALL_NCOMP * GRAD_SMALL_NH],
+            zc: [0.0; 3 * GRAD_SMALL_NCOMP * GRAD_SMALL_NH1],
+            hv: [0.0; GRAD_SMALL_NH1 * GRAD_SMALL_NCOMP],
+            q: [0.0; GRAD_SMALL_NCOMP * GRAD_SMALL_NH1],
+        }
+    }
+}
+
+/// [`HermiteR::compute`] for `lmax <= 2 GRAD_SMALL_LAB + 1` into the fixed buffers of
+/// `s`: the same Boys call, the same (−2p)^n F_n via `powi`, and the same recurrence
+/// (theory.typ eq:R-rec) with the same floating-point operations, so the entries with
+/// t+u+v <= lmax are identical. Inlined into [`quartet_gradient_small`], where `lmax`
+/// is a constant. Returns the table in the layout of [`HermiteR::as_slice`]
+/// (dim = lmax + 1); entry `GRAD_SMALL_CUBE` is 0.
+#[inline(always)]
+fn hermite_r_grad_small(lmax: usize, p: f64, r: [f64; 3], s: &mut GradSmallBuffers) -> &[f64; GRAD_SMALL_CUBE + 1] {
+    debug_assert!(lmax <= 2 * GRAD_SMALL_LAB + 1);
+    let dim = lmax + 1;
+    let r2 = r[0] * r[0] + r[1] * r[1] + r[2] * r[2];
+    let f = &mut s.f;
+    boys(lmax, p * r2, f);
+    let idx = |t: usize, u: usize, v: usize| (t * dim + u) * dim + v;
+    // Layer n is built from layer n+1 (in `cur`) into `nx`, then swapped.
+    let (mut cur, mut nx) = (&mut s.ra, &mut s.rb);
+    let m2p = -2.0 * p;
+    for n in (0..=lmax).rev() {
+        let m = lmax - n;
+        nx[0] = m2p.powi(n as i32) * f[n];
+        for t in 0..=m {
+            for u in 0..=m - t {
+                for v in 0..=m - t - u {
+                    if t + u + v == 0 {
+                        continue;
+                    }
+                    let val = if t > 0 {
+                        let mut s = r[0] * cur[idx(t - 1, u, v)];
+                        if t > 1 {
+                            s += (t - 1) as f64 * cur[idx(t - 2, u, v)];
+                        }
+                        s
+                    } else if u > 0 {
+                        let mut s = r[1] * cur[idx(t, u - 1, v)];
+                        if u > 1 {
+                            s += (u - 1) as f64 * cur[idx(t, u - 2, v)];
+                        }
+                        s
+                    } else {
+                        let mut s = r[2] * cur[idx(t, u, v - 1)];
+                        if v > 1 {
+                            s += (v - 1) as f64 * cur[idx(t, u, v - 2)];
+                        }
+                        s
+                    };
+                    nx[idx(t, u, v)] = val;
+                }
+            }
+        }
+        std::mem::swap(&mut cur, &mut nx);
+    }
+    cur
+}
+
+/// [`hermite_list`]`(l)` as a fixed array (`N` = n_hermite(l)), for compile-time tables.
+const fn hermite_array<const N: usize>(l: usize) -> [[usize; 3]; N] {
+    assert!(N == n_hermite(l));
+    let mut out = [[0; 3]; N];
+    let mut k = 0;
+    let mut n = 0;
+    while n <= l {
+        let mut t = n + 1;
+        while t > 0 {
+            t -= 1;
+            let mut u = n - t + 1;
+            while u > 0 {
+                u -= 1;
+                out[k] = [t, u, n - t - u];
+                k += 1;
+            }
+        }
+        n += 1;
+    }
+    out
+}
+
+/// The table `QuartetScratch::ridx` of [`quartet_gradient_general`] for l_ab = `lab`,
+/// l_cd = `lcd` (bra-major, `[i][j]`), with the index `GRAD_SMALL_CUBE` (an R entry
+/// that is 0) where the general kernel stores 0.
+const fn grad_ridx_table<const NI1: usize, const NJ1: usize>(lab: usize, lcd: usize) -> [[usize; NJ1]; NI1] {
+    let (hs, ks) = (hermite_array::<NI1>(lab + 1), hermite_array::<NJ1>(lcd + 1));
+    let ltot = lab + lcd + 1;
+    let dim = ltot + 1;
+    assert!(dim * dim * dim <= GRAD_SMALL_CUBE);
+    let mut out = [[0; NJ1]; NI1];
+    let mut i = 0;
+    while i < NI1 {
+        let mut j = 0;
+        while j < NJ1 {
+            let (h, k) = (hs[i], ks[j]);
+            let deg = h[0] + h[1] + h[2] + k[0] + k[1] + k[2];
+            out[i][j] =
+                if deg <= ltot { ((h[0] + k[0]) * dim + h[1] + k[1]) * dim + h[2] + k[2] } else { GRAD_SMALL_CUBE };
+            j += 1;
+        }
+        i += 1;
+    }
+    out
+}
+
+/// (−1)^{τ+ν+φ} per ket Hermite index of degree <= lcd + 1 (`signs` of
+/// [`quartet_gradient_general`]).
+const fn grad_sign_table<const NJ1: usize>(lcd: usize) -> [f64; NJ1] {
+    let ks = hermite_array::<NJ1>(lcd + 1);
+    let mut out = [0.0; NJ1];
+    let mut j = 0;
+    while j < NJ1 {
+        out[j] = if (ks[j][0] + ks[j][1] + ks[j][2]).is_multiple_of(2) { 1.0 } else { -1.0 };
+        j += 1;
+    }
+    out
 }
 
 #[inline]
@@ -430,7 +585,132 @@ fn dot(a: &[f64], b: &[f64]) -> f64 {
 /// `omega = Some(ω)` uses the operator erf(ωr)/r instead of 1/r (theory.typ eq:eri-erf; VERIFIED(Adamson1999, derived from Eqs. (1), (11)-(13), p. 922; the paper prints the erfc integral)
 /// the centre-derivative rule is unchanged, because the kernel depends only on r₁ − r₂
 /// and the centres enter only through the Hermite coefficients and P − Q).
+///
+/// Pairs with l_ab, l_cd <= GRAD_SMALL_LAB go to [`quartet_gradient_small`], the others
+/// to [`quartet_gradient_general`]; both give bit-identical results.
 fn quartet_gradient(
+    ab: &GradPair,
+    cd: &GradPair,
+    g: &[f64],
+    omega: Option<f64>,
+    s: &mut QuartetScratch,
+) -> [[f64; 3]; 4] {
+    match (ab.lab, cd.lab) {
+        (0, 0) => quartet_gradient_small::<0, 0, 1, 4, 1, 4>(ab, cd, g, omega, s),
+        (0, 1) => quartet_gradient_small::<0, 1, 1, 4, 4, 10>(ab, cd, g, omega, s),
+        (0, 2) => quartet_gradient_small::<0, 2, 1, 4, 10, 20>(ab, cd, g, omega, s),
+        (1, 0) => quartet_gradient_small::<1, 0, 4, 10, 1, 4>(ab, cd, g, omega, s),
+        (1, 1) => quartet_gradient_small::<1, 1, 4, 10, 4, 10>(ab, cd, g, omega, s),
+        (1, 2) => quartet_gradient_small::<1, 2, 4, 10, 10, 20>(ab, cd, g, omega, s),
+        (2, 0) => quartet_gradient_small::<2, 0, 10, 20, 1, 4>(ab, cd, g, omega, s),
+        (2, 1) => quartet_gradient_small::<2, 1, 10, 20, 4, 10>(ab, cd, g, omega, s),
+        (2, 2) => quartet_gradient_small::<2, 2, 10, 20, 10, 20>(ab, cd, g, omega, s),
+        _ => quartet_gradient_general(ab, cd, g, omega, s),
+    }
+}
+
+/// [`quartet_gradient_general`] for l_ab = `LAB`, l_cd = `LCD` <= GRAD_SMALL_LAB
+/// (`NI`, `NI1`, `NJ`, `NJ1` = n_hermite of LAB, LAB+1, LCD, LCD+1): the same sums in
+/// the same order, with the R table of [`hermite_r_grad_small`] (the same operations
+/// as [`HermiteR::compute`], with ltot a constant), the R index and sign tables built
+/// at compile time, and fixed-size buffers. The results are bit-identical.
+fn quartet_gradient_small<
+    const LAB: usize,
+    const LCD: usize,
+    const NI: usize,
+    const NI1: usize,
+    const NJ: usize,
+    const NJ1: usize,
+>(
+    ab: &GradPair,
+    cd: &GradPair,
+    g: &[f64],
+    omega: Option<f64>,
+    s: &mut QuartetScratch,
+) -> [[f64; 3]; 4] {
+    const { assert!(NI == n_hermite(LAB) && NI1 == n_hermite(LAB + 1) && NJ == n_hermite(LCD) && NJ1 == n_hermite(LCD + 1)) };
+    const { assert!(LAB <= GRAD_SMALL_LAB && LCD <= GRAD_SMALL_LAB) };
+    let ridx: [[usize; NJ1]; NI1] = const { grad_ridx_table::<NI1, NJ1>(LAB, LCD) };
+    let signs: [f64; NJ1] = const { grad_sign_table::<NJ1>(LCD) };
+    debug_assert!(ab.lab == LAB && cd.lab == LCD);
+    let (nab, ncd) = (ab.ncomp, cd.ncomp);
+    debug_assert!(nab <= GRAD_SMALL_NCOMP && ncd <= GRAD_SMALL_NCOMP);
+    let b = &mut s.small;
+    let mut rmat = [[0.0; NJ1]; NI1];
+    let mut gab = [[0.0; 3]; 2];
+    let mut gc = [0.0; 3];
+    for pc in &cd.prims {
+        // Z_v and Z_C for this ket primitive pair.
+        let zv = &mut b.zv[..nab * NJ];
+        let zc = &mut b.zc[..3 * nab * NJ1];
+        for (j, &sign) in signs.iter().enumerate() {
+            let ev = &pc.e[j * ncd..(j + 1) * ncd];
+            for a in 0..nab {
+                let grow = &g[a * ncd..(a + 1) * ncd];
+                if j < NJ {
+                    zv[a * NJ + j] = sign * dot(grow, ev);
+                }
+                for k in 0..3 {
+                    // The C derivative of (cd) is the "A" (first-centre) set of the pair.
+                    let ec = &pc.e[((1 + k) * NJ1 + j) * ncd..((1 + k) * NJ1 + j + 1) * ncd];
+                    zc[(k * nab + a) * NJ1 + j] = sign * dot(grow, ec);
+                }
+            }
+        }
+        for pa in &ab.prims {
+            let (p, q) = (pa.p, pc.p);
+            let mut alpha = p * q / (p + q);
+            let pq = [0, 1, 2].map(|k| pa.center[k] - pc.center[k]);
+            let mut pref = 2.0 * PI.powf(2.5) / (p * q * (p + q).sqrt());
+            if let Some(w) = omega {
+                // theory.typ eq:eri-erf
+                let (a_eff, scale) = erf_attenuation(alpha, w);
+                alpha = a_eff;
+                pref *= scale;
+            }
+            let rdata = hermite_r_grad_small(LAB + LCD + 1, alpha, pq, b);
+            for (row, ix) in rmat.iter_mut().zip(&ridx) {
+                for (x, &i) in row.iter_mut().zip(ix) {
+                    *x = rdata[i];
+                }
+            }
+            // H[i][ab], i < ni1.
+            let hv = &mut b.hv[..NI1 * nab];
+            for (i, xr) in rmat.iter().enumerate() {
+                let xrow = &xr[..NJ];
+                for a in 0..nab {
+                    hv[i * nab + a] = dot(&b.zv[a * NJ..(a + 1) * NJ], xrow);
+                }
+            }
+            for (set, out) in [(1, (0, 0)), (2, (0, 1)), (3, (0, 2)), (4, (1, 0)), (5, (1, 1)), (6, (1, 2))] {
+                let e = &pa.e[set * NI1 * nab..(set + 1) * NI1 * nab];
+                gab[out.0][out.1] += pref * dot(e, hv);
+            }
+            // Q[ab][j], j < nj1, from the value coefficients (i < ni).
+            let qv = &mut b.q[..nab * NJ1];
+            qv.fill(0.0);
+            for (i, xrow) in rmat.iter().enumerate().take(NI) {
+                let ev = &pa.e[i * nab..(i + 1) * nab];
+                for (a, &e) in ev.iter().enumerate() {
+                    if e == 0.0 {
+                        continue;
+                    }
+                    for (o, x) in qv[a * NJ1..(a + 1) * NJ1].iter_mut().zip(xrow) {
+                        *o += e * x;
+                    }
+                }
+            }
+            for (k, gck) in gc.iter_mut().enumerate() {
+                *gck += pref * dot(&b.zc[k * nab * NJ1..(k + 1) * nab * NJ1], qv);
+            }
+        }
+    }
+    let gd = [0, 1, 2].map(|k| -(gab[0][k] + gab[1][k] + gc[k]));
+    [gab[0], gab[1], gc, gd]
+}
+
+/// [`quartet_gradient`] for any angular momenta.
+fn quartet_gradient_general(
     ab: &GradPair,
     cd: &GradPair,
     g: &[f64],
@@ -931,6 +1211,82 @@ mod tests {
             }
             println!("{}: worst |analytic - frozen-grid FD| {worst:.1e}", fun.name());
         }
+    }
+
+    /// The fixed-size R table equals `HermiteR::compute` bit for bit (same environment,
+    /// so the libm `exp` of the Boys function is the same).
+    #[test]
+    fn small_r_table_matches_hermite_r() {
+        let mut general = HermiteR::new();
+        let mut small = GradSmallBuffers::default();
+        for lmax in 0..=2 * GRAD_SMALL_LAB + 1 {
+            for (p, r) in [
+                (0.37, [0.0, 0.0, 0.0]),
+                (1.9, [0.3, -1.2, 0.8]),
+                (25.0, [-2.5, 0.1, 3.7]),
+                (0.012, [4.0, -6.0, 1.5]),
+                (310.0, [1e-3, 2e-3, -5e-4]),
+            ] {
+                general.compute(lmax, p, r);
+                let rs = hermite_r_grad_small(lmax, p, r, &mut small);
+                let dim = lmax + 1;
+                for t in 0..=lmax {
+                    for u in 0..=lmax - t {
+                        for v in 0..=lmax - t - u {
+                            assert_eq!(rs[(t * dim + u) * dim + v].to_bits(), general.get(t, u, v).to_bits());
+                        }
+                    }
+                }
+                assert_eq!(rs[GRAD_SMALL_CUBE], 0.0);
+            }
+        }
+    }
+
+    /// The compile-time Hermite list is `hermite_list`.
+    #[test]
+    fn hermite_array_matches_hermite_list() {
+        assert_eq!(hermite_array::<1>(0).to_vec(), hermite_list(0));
+        assert_eq!(hermite_array::<4>(1).to_vec(), hermite_list(1));
+        assert_eq!(hermite_array::<10>(2).to_vec(), hermite_list(2));
+        assert_eq!(hermite_array::<20>(3).to_vec(), hermite_list(3));
+    }
+
+    /// `quartet_gradient` (the specialized kernels for l_ab, l_cd <= 2) equals
+    /// `quartet_gradient_general` bit for bit for every shell quartet of a 6-31G*
+    /// molecule (s, p and Cartesian d shells), random Γ, without and with ω.
+    #[test]
+    fn small_quartet_gradient_matches_general() {
+        let m = mol_at(&[]);
+        let b = basis(&m, true);
+        let nsh = b.shells().len();
+        let mut pairs = Vec::new();
+        for a in 0..nsh {
+            for c in 0..=a {
+                pairs.push(GradPair::new(&b, a, c));
+            }
+        }
+        let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut rand = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0
+        };
+        let mut seen = [[false; 3]; 3];
+        let (mut s1, mut s2) = (QuartetScratch::default(), QuartetScratch::default());
+        for (ij, ab) in pairs.iter().enumerate() {
+            for cd in &pairs[..=ij] {
+                let g: Vec<f64> = (0..ab.ncomp * cd.ncomp).map(|_| rand()).collect();
+                for omega in [None, Some(0.33)] {
+                    let fast = quartet_gradient(ab, cd, &g, omega, &mut s1);
+                    let slow = quartet_gradient_general(ab, cd, &g, omega, &mut s2);
+                    let bits = |f: [[f64; 3]; 4]| f.map(|r| r.map(f64::to_bits));
+                    assert_eq!(bits(fast), bits(slow), "lab {} lcd {} omega {omega:?}", ab.lab, cd.lab);
+                }
+                if ab.lab <= GRAD_SMALL_LAB && cd.lab <= GRAD_SMALL_LAB {
+                    seen[ab.lab][cd.lab] = true;
+                }
+            }
+        }
+        assert_eq!(seen, [[true; 3]; 3], "not every (l_ab, l_cd) <= 2 was exercised");
     }
 
     #[test]

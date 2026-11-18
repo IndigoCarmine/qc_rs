@@ -29,6 +29,7 @@ pub mod boys;
 pub mod calculation;
 pub mod dft;
 pub mod direct;
+pub mod dispersion;
 pub mod dual;
 pub mod error;
 pub mod functional;

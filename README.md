@@ -144,6 +144,16 @@ python -m venv .venv
 
 参照値の JSON はリポジトリに入っているので、`cargo test` に Python や PySCF は要りません。
 
+振動数解析の参照値（JSON の `hessians`）は、geomeTRIC で最適化した構造（DFT は単点と同じ (150, 1202) 格子）での
+PySCF の解析的 Hessian、`thermo.harmonic_analysis` の振動数・基準振動、`thermo.thermo` の熱化学（298.15 K・101325 Pa と 500 K・2×10⁵ Pa）です。
+対象は H2O（歪んだ初期構造）・NH3・HCN（直線）の RHF/6-31G*、H2O・NH3 の B3LYP/6-31G、H2O の CAM-B3LYP/6-31G。
+質量は PySCF の既定（同位体平均）で、`docs/theory.typ` の標準原子量の表と H・C・N・O・Cl で一致します。
+対称数は PySCF が自動で決めた値です。IR 強度（`ir_intensity_km_mol`）は PySCF の結果ではありません（この版の PySCF に IR の機能はない）：
+PySCF の双極子モーメントを ±5×10⁻³ Bohr のデカルト変位で計算して中心差分し、PySCF の基準振動で縮約して、
+`docs/theory.typ` の `eq:ir-intensity` の換算（km/mol）を当てたものです。
+全体を再生成すると既存の値は SCF の収束の範囲（1e-9 程度）でずれるので、この部分だけは
+`gen_pyscf_reference.py --hessians-only` で、ほかの値を変えずに書き足しています。
+
 分散補正 D3 の参照値 `tests/reference/d3_reference.json` は、dftd3 1.7.0（simple-dftd3 の Python API、LGPL。参照値を作るためだけに使い、同梱しない）で作りました。
 減衰パラメータは汎関数名で読み込まず数値で渡し、3 体項は切り（s9 = 0）、カットオフは全原子間距離より大きくしています：
 

@@ -49,11 +49,13 @@ fn main() -> qc_rs::Result<()> {
     let value = |flag: &str| args.iter().position(|a| a == flag).map(|i| args[i + 1].clone());
     let method = value("--method").unwrap_or_else(|| "hf".into());
     let basis = value("--basis").unwrap_or_else(|| "6-31g*".into());
-    let mut opts = ScfOptions::default();
-    opts.integral_strategy = match value("--strategy").as_deref() {
-        Some("stored") => IntegralStrategy::Stored,
-        Some("direct") => IntegralStrategy::Direct,
-        _ => IntegralStrategy::Auto,
+    let mut opts = ScfOptions {
+        integral_strategy: match value("--strategy").as_deref() {
+            Some("stored") => IntegralStrategy::Stored,
+            Some("direct") => IntegralStrategy::Direct,
+            _ => IntegralStrategy::Auto,
+        },
+        ..ScfOptions::default()
     };
     if let Some(t) = value("--threshold") {
         opts.direct_threshold = t.parse().expect("threshold");

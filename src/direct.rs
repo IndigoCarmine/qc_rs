@@ -227,11 +227,202 @@ impl HermiteRFast {
     }
 }
 
+/// Largest l_a + l_b of a shell pair served by the unrolled kernel [`quartet_small`]
+/// (s and p shells), so that its R tables have ltot <= 4.
+const SMALL_LAB: usize = 2;
+/// Size of an R table of [`hermite_r_small`]: (2 SMALL_LAB + 1)³.
+const SMALL_CUBE: usize = (2 * SMALL_LAB + 1) * (2 * SMALL_LAB + 1) * (2 * SMALL_LAB + 1);
+
+/// R tables of [`hermite_r_small`] (two layers, alternately read and written).
+struct SmallR {
+    a: [f64; SMALL_CUBE],
+    b: [f64; SMALL_CUBE],
+    f: [f64; TABULATED_NMAX + 1],
+}
+
+impl Default for SmallR {
+    fn default() -> Self {
+        SmallR { a: [0.0; SMALL_CUBE], b: [0.0; SMALL_CUBE], f: [0.0; TABULATED_NMAX + 1] }
+    }
+}
+
+/// [`HermiteRFast::compute`] for `lmax <= 2 SMALL_LAB` into fixed-size buffers: the
+/// same recurrence (eq:R-rec) with the same floating-point operations, so the values
+/// are identical. Inlined into [`quartet_small`], where `lmax` is a constant and the
+/// loops are unrolled. Returns the table in the layout of [`HermiteRFast`].
+#[inline(always)]
+fn hermite_r_small(lmax: usize, alpha: f64, r: [f64; 3], s: &mut SmallR) -> &[f64; SMALL_CUBE] {
+    debug_assert!(lmax <= 2 * SMALL_LAB);
+    let dim = lmax + 1;
+    let x2 = alpha * (r[0] * r[0] + r[1] * r[1] + r[2] * r[2]);
+    let f = &mut s.f;
+    boys_tabulated(lmax, x2, f);
+    let (mut cur, mut nx) = (&mut s.a, &mut s.b);
+    if lmax == 0 {
+        cur[0] = f[0];
+        return cur;
+    }
+    // (-2α)^n F_n
+    let m2a = -2.0 * alpha;
+    let mut pw = 1.0;
+    for fv in f.iter_mut().take(lmax + 1) {
+        *fv *= pw;
+        pw *= m2a;
+    }
+    let idx = |t: usize, u: usize, v: usize| (t * dim + u) * dim + v;
+    cur[0] = f[lmax];
+    for n in (0..lmax).rev() {
+        let m = lmax - n;
+        nx[0] = f[n];
+        for t in 1..=m {
+            for u in 0..=m - t {
+                for v in 0..=m - t - u {
+                    let mut val = r[0] * cur[idx(t - 1, u, v)];
+                    if t > 1 {
+                        val += (t - 1) as f64 * cur[idx(t - 2, u, v)];
+                    }
+                    nx[idx(t, u, v)] = val;
+                }
+            }
+        }
+        for u in 1..=m {
+            for v in 0..=m - u {
+                let mut val = r[1] * cur[idx(0, u - 1, v)];
+                if u > 1 {
+                    val += (u - 1) as f64 * cur[idx(0, u - 2, v)];
+                }
+                nx[idx(0, u, v)] = val;
+            }
+        }
+        for v in 1..=m {
+            let mut val = r[2] * cur[idx(0, 0, v - 1)];
+            if v > 1 {
+                val += (v - 1) as f64 * cur[idx(0, 0, v - 2)];
+            }
+            nx[idx(0, 0, v)] = val;
+        }
+        std::mem::swap(&mut cur, &mut nx);
+    }
+    cur
+}
+
+/// Number of Hermite indices t + u + v <= l.
+const fn n_tuv(l: usize) -> usize {
+    (l + 1) * (l + 2) * (l + 3) / 6
+}
+
+/// Hermite indices with t + u + v <= l in the order of `ShellPairData::tuv`.
+const fn tuv_list<const N: usize>(l: usize) -> [[usize; 3]; N] {
+    assert!(N == n_tuv(l));
+    let mut out = [[0; 3]; N];
+    let mut k = 0;
+    let mut t = 0;
+    while t <= l {
+        let mut u = 0;
+        while u <= l - t {
+            let mut v = 0;
+            while v <= l - t - u {
+                out[k] = [t, u, v];
+                k += 1;
+                v += 1;
+            }
+            u += 1;
+        }
+        t += 1;
+    }
+    out
+}
+
+/// Index into the R table (dim = lab + lcd + 1) of every (ket tuv, bra tuv),
+/// ket-major; the table `Scratch::ridx` of the general kernel.
+const fn ridx_table<const NTI: usize, const NTJ: usize>(lab: usize, lcd: usize) -> [[usize; NTI]; NTJ] {
+    let (hs, gs) = (tuv_list::<NTI>(lab), tuv_list::<NTJ>(lcd));
+    let dim = lab + lcd + 1;
+    let mut out = [[0; NTI]; NTJ];
+    let mut jt = 0;
+    while jt < NTJ {
+        let mut it = 0;
+        while it < NTI {
+            let (h, g) = (hs[it], gs[jt]);
+            out[jt][it] = ((h[0] + g[0]) * dim + h[1] + g[1]) * dim + h[2] + g[2];
+            it += 1;
+        }
+        jt += 1;
+    }
+    out
+}
+
+/// (-1)^{τ+ν+φ} per ket Hermite index (`DirectPair::sign`).
+const fn sign_table<const NTJ: usize>(lcd: usize) -> [f64; NTJ] {
+    let gs = tuv_list::<NTJ>(lcd);
+    let mut out = [0.0; NTJ];
+    let mut jt = 0;
+    while jt < NTJ {
+        out[jt] = if (gs[jt][0] + gs[jt][1] + gs[jt][2]).is_multiple_of(2) { 1.0 } else { -1.0 };
+        jt += 1;
+    }
+    out
+}
+
+/// [`quartet`] without a range-separated kernel for l_ab = `LAB`, l_cd = `LCD` <=
+/// SMALL_LAB (`NTI`, `NTJ` their numbers of Hermite indices): the same sums in the
+/// same order, with the R recurrence unrolled for ltot = LAB + LCD, the R index and
+/// sign tables built at compile time, and fixed-length Hermite rows.
+fn quartet_small<const LAB: usize, const LCD: usize, const NTI: usize, const NTJ: usize>(
+    ab: &DirectPair,
+    cd: &DirectPair,
+    prim_cut: f64,
+    s: &mut Scratch,
+) {
+    let ridx: [[usize; NTI]; NTJ] = const { ridx_table::<NTI, NTJ>(LAB, LCD) };
+    let sign: [f64; NTJ] = const { sign_table::<NTJ>(LCD) };
+    debug_assert!(ab.lab == LAB && cd.lab == LCD);
+    let n = ab.ncomp * cd.ncomp;
+    s.x.resize(NTI * cd.ncomp, 0.0);
+    s.v.clear();
+    s.v.resize(n, 0.0);
+    let mut rm = [[0.0; NTI]; NTJ];
+    let qc_max = cd.prims.first().map_or(0.0, |x| x.q);
+    for pa in &ab.prims {
+        if pa.q * qc_max < prim_cut {
+            break;
+        }
+        s.x.fill(0.0);
+        for pc in &cd.prims {
+            if pa.q * pc.q < prim_cut {
+                break;
+            }
+            let (p, q) = (pa.p, pc.p);
+            let alpha = p * q / (p + q);
+            let pq = [0, 1, 2].map(|k| pa.center[k] - pc.center[k]);
+            let pref = TWO_PI_POW_2_5 / (p * q * (p + q).sqrt());
+            let rc = hermite_r_small(LAB + LCD, alpha, pq, &mut s.small_r);
+            for ((row, ix), &sg) in rm.iter_mut().zip(&ridx).zip(&sign) {
+                let f = sg * pref;
+                for (d, &i) in row.iter_mut().zip(ix) {
+                    *d = f * rc[i];
+                }
+            }
+            // accumulate_ket with rows of length NTI.
+            for (c, xr) in s.x.as_chunks_mut::<NTI>().0.iter_mut().enumerate() {
+                for k in cd.off[c]..cd.off[c + 1] {
+                    let e = pc.val[k];
+                    for (xv, &r) in xr.iter_mut().zip(&rm[cd.idx[k]]) {
+                        *xv += e * r;
+                    }
+                }
+            }
+        }
+        contract_bra(ab, cd.ncomp, &pa.val, &s.x, &mut s.v);
+    }
+}
+
 /// Per-thread scratch buffers.
 #[derive(Default)]
 struct Scratch {
     r: HermiteRFast,
     r_erf: HermiteRFast,
+    small_r: SmallR,
     /// Index into the R table of every (ket tuv, bra tuv), ket-major.
     ridx: Vec<usize>,
     /// pref (-1)^{τ+ν+φ} R_{t+τ,u+ν,v+φ}, ket-major `[jt][it]`; Coulomb kernel.
@@ -292,6 +483,25 @@ type ErfKernel = (f64, f64, f64);
 /// first (x), so that the bra coefficients are applied once per bra primitive pair.
 /// Primitive quartets with Q_a Q_c < `prim_cut` (primitive Schwarz factors) are skipped.
 fn quartet(ab: &DirectPair, cd: &DirectPair, erf: Option<ErfKernel>, prim_cut: f64, s: &mut Scratch) {
+    if erf.is_none() {
+        match (ab.lab, cd.lab) {
+            (0, 0) => return quartet_small::<0, 0, 1, 1>(ab, cd, prim_cut, s),
+            (0, 1) => return quartet_small::<0, 1, 1, 4>(ab, cd, prim_cut, s),
+            (0, 2) => return quartet_small::<0, 2, 1, 10>(ab, cd, prim_cut, s),
+            (1, 0) => return quartet_small::<1, 0, 4, 1>(ab, cd, prim_cut, s),
+            (1, 1) => return quartet_small::<1, 1, 4, 4>(ab, cd, prim_cut, s),
+            (1, 2) => return quartet_small::<1, 2, 4, 10>(ab, cd, prim_cut, s),
+            (2, 0) => return quartet_small::<2, 0, 10, 1>(ab, cd, prim_cut, s),
+            (2, 1) => return quartet_small::<2, 1, 10, 4>(ab, cd, prim_cut, s),
+            (2, 2) => return quartet_small::<2, 2, 10, 10>(ab, cd, prim_cut, s),
+            _ => {}
+        }
+    }
+    quartet_general(ab, cd, erf, prim_cut, s);
+}
+
+/// [`quartet`] for any angular momenta and kernel.
+fn quartet_general(ab: &DirectPair, cd: &DirectPair, erf: Option<ErfKernel>, prim_cut: f64, s: &mut Scratch) {
     let (nti, ntj) = (ab.tuv.len(), cd.tuv.len());
     let n = ab.ncomp * cd.ncomp;
     let ltot = ab.lab + cd.lab;
@@ -786,6 +996,29 @@ mod tests {
             let dkx = (&kx.unwrap() - &kx0).max_abs();
             assert!(dkx < 1e-12, "cart={cart}: |dK^x| {dkx:.2e}");
         }
+    }
+
+    #[test]
+    fn small_kernel_matches_general() {
+        // The unrolled s/p kernel performs the same operations as the general one, so
+        // every shell quartet agrees exactly, with and without primitive screening.
+        let b = Basis::from_name(&molecule(), "6-31g").unwrap();
+        let pairs: Vec<DirectPair> =
+            (0..b.shells().len()).flat_map(|a| (0..=a).map(move |c| (a, c))).map(|(a, c)| DirectPair::new(&b, a, c)).collect();
+        let (mut s1, mut s2) = (Scratch::default(), Scratch::default());
+        let mut classes = std::collections::BTreeSet::new();
+        for ab in &pairs {
+            for cd in &pairs {
+                assert!(ab.lab <= SMALL_LAB && cd.lab <= SMALL_LAB);
+                classes.insert((ab.lab, cd.lab));
+                for cut in [0.0, 1e-3] {
+                    quartet(ab, cd, None, cut, &mut s1);
+                    quartet_general(ab, cd, None, cut, &mut s2);
+                    assert_eq!(s1.v, s2.v);
+                }
+            }
+        }
+        assert_eq!(classes.len(), (SMALL_LAB + 1) * (SMALL_LAB + 1));
     }
 
     #[test]

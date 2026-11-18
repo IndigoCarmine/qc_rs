@@ -5,23 +5,27 @@
 //! forward-mode differentiation (theory.typ eq:dual).
 //!
 //! One file per component, each headed by its literature reference:
-//! `slater.rs`, `b88.rs`, `vwn.rs` (VWN5 and VWN-RPA share one formula) and
-//! `lyp.rs`. This file holds the mixtures (BLYP, B3LYP, …).
+//! `slater.rs`, `b88.rs`, `vwn.rs` (VWN5 and VWN-RPA share one formula), `lyp.rs`
+//! and `cam_b88.rs` (short-range B88 of CAM-B3LYP). This file holds the mixtures
+//! (BLYP, B3LYP, CAM-B3LYP, …).
 
 mod b88;
+mod cam_b88;
 mod lyp;
 mod slater;
 mod vwn;
 
 use crate::dual::Dual;
 use crate::error::{QcError, Result};
+use crate::integrals::ExchangeKernel;
 use b88::b88;
+use cam_b88::cam_b88;
 use lyp::lyp;
 use slater::slater;
 use vwn::{VWN_RPA, VWN5, vwn};
 
 /// A single exchange or correlation energy density.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum XcComponent {
     /// Slater (Dirac) LDA exchange. theory.typ eq:slater
     SlaterExchange,
@@ -33,12 +37,23 @@ pub enum XcComponent {
     VwnRpaCorrelation,
     /// Lee–Yang–Parr GGA correlation, closed-shell form. theory.typ eq:lyp
     LypCorrelation,
+    /// B88 exchange for the part [1 − α − β erf(ωr)]/r of the Coulomb operator
+    /// (Coulomb-attenuating method; the rest is exact exchange with the same α, β, ω).
+    /// theory.typ eq:cam-b88
+    CamB88Exchange {
+        /// Short-range fraction α of exact exchange.
+        alpha: f64,
+        /// Long-range addition β of exact exchange.
+        beta: f64,
+        /// Range-separation parameter ω (Bohr⁻¹).
+        omega: f64,
+    },
 }
 
 impl XcComponent {
     /// Whether the component depends on σ = |∇ρ|².
     pub fn is_gga(self) -> bool {
-        matches!(self, XcComponent::B88Exchange | XcComponent::LypCorrelation)
+        matches!(self, XcComponent::B88Exchange | XcComponent::LypCorrelation | XcComponent::CamB88Exchange { .. })
     }
 
     /// Energy density f(ρ̂, σ̂) as a dual number (ρ > 0, σ > 0).
@@ -49,6 +64,7 @@ impl XcComponent {
             XcComponent::Vwn5Correlation => vwn(rho, VWN5),
             XcComponent::VwnRpaCorrelation => vwn(rho, VWN_RPA),
             XcComponent::LypCorrelation => lyp(rho, sigma),
+            XcComponent::CamB88Exchange { alpha, beta, omega } => cam_b88(rho, sigma, alpha, beta, omega),
         }
     }
 }
@@ -64,18 +80,28 @@ pub struct XcValues {
     pub v_sigma: f64,
 }
 
-/// f = Σ_k c_k f_k plus a fraction a_HF of exact exchange (theory.typ section 9.5).
+/// f = Σ_k c_k f_k plus exact exchange with the kernel [α + β erf(ωr)]/r
+/// (theory.typ section 9.5 and eq:cam-b3lyp; an ordinary hybrid has α = a_HF, β = 0).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Functional {
     name: String,
     terms: Vec<(f64, XcComponent)>,
-    exact_exchange: f64,
+    exact_exchange: ExchangeKernel,
 }
 
 impl Functional {
-    /// General functional: linear combination `terms` of components and a_HF.
+    /// General functional: linear combination `terms` of components and a global
+    /// fraction a_HF of exact exchange.
     pub fn new(name: &str, terms: Vec<(f64, XcComponent)>, exact_exchange: f64) -> Self {
-        Functional { name: name.to_string(), terms, exact_exchange }
+        Self::with_exchange_kernel(name, terms, ExchangeKernel::global(exact_exchange))
+    }
+
+    /// General functional with an exact-exchange kernel [α + β erf(ωr)]/r
+    /// (theory.typ eq:cam-k). The density-functional exchange in `terms` must cover the
+    /// complementary part of the operator (e.g. [`XcComponent::CamB88Exchange`] with the
+    /// same α, β, ω).
+    pub fn with_exchange_kernel(name: &str, terms: Vec<(f64, XcComponent)>, kernel: ExchangeKernel) -> Self {
+        Functional { name: name.to_string(), terms, exact_exchange: kernel }
     }
 
     /// Hartree–Fock: f = 0, a_HF = 1.
@@ -129,6 +155,19 @@ impl Functional {
         Self::new("B3LYP5", Self::b3lyp_terms(XcComponent::Vwn5Correlation), 0.20)
     }
 
+    /// CAM-B3LYP (theory.typ eq:cam-b3lyp): short-range B88 exchange (eq:cam-b88) +
+    /// 0.81 LYP + 0.19 VWN5, exact exchange with α = 0.19, β = 0.46, ω = 0.33 Bohr⁻¹
+    /// (PySCF "camb3lyp"). References in `cam_b88.rs`, `lyp.rs` and `vwn.rs`.
+    pub fn cam_b3lyp() -> Self {
+        let kernel = ExchangeKernel { alpha: 0.19, beta: 0.46, omega: 0.33 };
+        let x = XcComponent::CamB88Exchange { alpha: kernel.alpha, beta: kernel.beta, omega: kernel.omega };
+        Self::with_exchange_kernel(
+            "CAM-B3LYP",
+            vec![(1.0, x), (0.81, XcComponent::LypCorrelation), (0.19, XcComponent::Vwn5Correlation)],
+            kernel,
+        )
+    }
+
     fn b3lyp_terms(vwn: XcComponent) -> Vec<(f64, XcComponent)> {
         vec![
             (0.08, XcComponent::SlaterExchange),
@@ -141,7 +180,8 @@ impl Functional {
     /// Looks up a functional by name (case-insensitive, spaces ignored). Accepts the
     /// names of theory.typ section 9.5 and PySCF-style spellings:
     /// "hf"; "slater", "slater,", "lda,"; "svwn5", "slater,vwn5"; "svwn-rpa", "svwn_rpa",
-    /// "slater,vwn_rpa"; "b88", "b88,"; "blyp", "b88,lyp"; "b3lyp", "b3lypg"; "b3lyp5".
+    /// "slater,vwn_rpa"; "b88", "b88,"; "blyp", "b88,lyp"; "b3lyp", "b3lypg"; "b3lyp5";
+    /// "cam-b3lyp", "camb3lyp", "cam_b3lyp".
     pub fn from_name(name: &str) -> Result<Self> {
         let key: String = name.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_ascii_lowercase();
         Ok(match key.as_str() {
@@ -155,6 +195,7 @@ impl Functional {
             "blyp" | "b88,lyp" => Self::blyp(),
             "b3lyp" | "b3lypg" => Self::b3lyp(),
             "b3lyp5" => Self::b3lyp5(),
+            "cam-b3lyp" | "camb3lyp" | "cam_b3lyp" => Self::cam_b3lyp(),
             _ => return Err(QcError::InvalidInput(format!("unknown functional '{name}'"))),
         })
     }
@@ -169,8 +210,14 @@ impl Functional {
         &self.terms
     }
 
-    /// a_HF.
+    /// a_HF of an ordinary hybrid; for a range-separated functional the short-range
+    /// fraction α (see [`Functional::exchange_kernel`] for the full kernel).
     pub fn exact_exchange_fraction(&self) -> f64 {
+        self.exact_exchange.alpha
+    }
+
+    /// The exact-exchange kernel (α, β, ω) of theory.typ eq:cam-k.
+    pub fn exchange_kernel(&self) -> ExchangeKernel {
         self.exact_exchange
     }
 
@@ -200,12 +247,13 @@ mod tests {
     use super::*;
     use std::f64::consts::PI;
 
-    const ALL: [XcComponent; 5] = [
+    const ALL: [XcComponent; 6] = [
         XcComponent::SlaterExchange,
         XcComponent::B88Exchange,
         XcComponent::Vwn5Correlation,
         XcComponent::VwnRpaCorrelation,
         XcComponent::LypCorrelation,
+        XcComponent::CamB88Exchange { alpha: 0.19, beta: 0.46, omega: 0.33 },
     ];
 
     #[test]
@@ -253,6 +301,14 @@ mod tests {
             + 0.81 * c(XcComponent::LypCorrelation);
         assert!((b3 - expect).abs() < 1e-14);
         assert_eq!(Functional::b3lyp().exact_exchange_fraction(), 0.2);
+        assert_eq!(Functional::b3lyp().exchange_kernel(), ExchangeKernel::global(0.2));
+        let cam = Functional::cam_b3lyp();
+        let x = XcComponent::CamB88Exchange { alpha: 0.19, beta: 0.46, omega: 0.33 };
+        let expect = c(x) + 0.81 * c(XcComponent::LypCorrelation) + 0.19 * c(XcComponent::Vwn5Correlation);
+        assert!((cam.eval(rho, sigma).f - expect).abs() < 1e-14);
+        assert_eq!(cam.exchange_kernel(), ExchangeKernel { alpha: 0.19, beta: 0.46, omega: 0.33 });
+        assert_eq!(cam.exact_exchange_fraction(), 0.19);
+        assert!(cam.exchange_kernel().is_range_separated() && !Functional::b3lyp().exchange_kernel().is_range_separated());
     }
 
     #[test]
@@ -266,6 +322,10 @@ mod tests {
         assert_eq!(Functional::from_name("b88,").unwrap(), Functional::b88());
         assert_eq!(Functional::from_name("slater,").unwrap(), Functional::slater());
         assert_eq!(Functional::from_name("HF").unwrap(), Functional::hf());
+        for name in ["cam-b3lyp", "CAM-B3LYP", "camb3lyp", "cam_b3lyp"] {
+            assert_eq!(Functional::from_name(name).unwrap(), Functional::cam_b3lyp());
+        }
+        assert!(Functional::cam_b3lyp().is_gga());
         assert!(!Functional::hf().has_density_part());
         assert!(Functional::blyp().is_gga());
         assert!(!Functional::svwn5().is_gga());

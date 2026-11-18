@@ -3,7 +3,7 @@
 
 use crate::basis::Basis;
 use crate::error::{QcError, Result};
-use crate::integrals::{EriTensor, core_hamiltonian, overlap};
+use crate::integrals::{EriTensor, ExchangeKernel, core_hamiltonian, overlap};
 use crate::linalg::{Matrix, solve, symmetric_eigen};
 use crate::molecule::{Atom, Molecule};
 use std::collections::VecDeque;
@@ -18,10 +18,19 @@ pub struct XcTerm {
 }
 
 /// A model for the exchange-correlation part of the Fock matrix
-/// F = h + J - (a_HF/2) K + V^xc (theory.typ eq:fock-rks).
+/// F = h + J - ½ K^x + V^xc (theory.typ eq:fock-rks, eq:cam-fock), where K^x is the
+/// exchange matrix of the kernel [α + β erf(ωr)]/r (eq:cam-k); K^x = a_HF K for an
+/// ordinary hybrid.
 pub trait ExchangeCorrelation {
-    /// Fraction a_HF of exact (Hartree–Fock) exchange.
+    /// Fraction a_HF of exact (Hartree–Fock) exchange (the short-range fraction α for a
+    /// range-separated kernel).
     fn exact_exchange_fraction(&self) -> f64;
+    /// The exact-exchange kernel (α, β, ω) of theory.typ eq:cam-k. The default is the
+    /// global fraction [`ExchangeCorrelation::exact_exchange_fraction`] (β = 0); this
+    /// is what the SCF uses.
+    fn exchange_kernel(&self) -> ExchangeKernel {
+        ExchangeKernel::global(self.exact_exchange_fraction())
+    }
     /// E_xc and V^xc for density matrix `density`, or `None` if there is no
     /// density-functional part.
     fn evaluate(&mut self, density: &Matrix) -> Result<Option<XcTerm>>;
@@ -95,7 +104,7 @@ pub struct EnergyComponents {
     pub one_electron: f64,
     /// ½ Σ P J.
     pub coulomb: f64,
-    /// -(a_HF/4) Σ P K.
+    /// -(1/4) Σ P K^x (= -(a_HF/4) Σ P K for an ordinary hybrid). theory.typ eq:cam-fock
     pub exchange: f64,
     /// E_xc.
     pub xc: f64,
@@ -149,15 +158,28 @@ struct ScfSystem<'a> {
     s: Matrix,
     x: Matrix,
     eri: EriTensor,
+    /// Exact-exchange kernel of `xc`.
+    kernel: ExchangeKernel,
+    /// α (μν|λσ) + β (μν|λσ)_ω for a range-separated kernel (theory.typ eq:cam-k).
+    exchange_eri: Option<EriTensor>,
     e_nuc: f64,
     xc: &'a mut dyn ExchangeCorrelation,
 }
 
 impl ScfSystem<'_> {
-    /// Fock matrix and energy components for density `p`. theory.typ eq:fock-rks, eq:e-rks
+    /// Fock matrix and energy components for density `p`. theory.typ eq:fock-rks,
+    /// eq:e-rks, eq:cam-fock
     fn fock(&mut self, p: &Matrix) -> Result<(Matrix, EnergyComponents)> {
-        let a_hf = self.xc.exact_exchange_fraction();
-        let (j, k) = self.eri.coulomb_exchange(p, a_hf != 0.0);
+        let (j, k, a_hf) = match &self.exchange_eri {
+            // K^x from the combined tensor (theory.typ eq:cam-k), already scaled.
+            Some(x) => (self.eri.coulomb_exchange(p, false).0, Some(x.exchange(p)), 1.0),
+            // K^x = a_HF K (theory.typ eq:fock-rks).
+            None => {
+                let a_hf = self.kernel.alpha;
+                let (j, k) = self.eri.coulomb_exchange(p, a_hf != 0.0);
+                (j, k, a_hf)
+            }
+        };
         let mut f = &self.h + &j;
         let mut comps = EnergyComponents {
             one_electron: p.dot(&self.h),
@@ -283,7 +305,8 @@ pub fn atomic_density_guess(mol: &Molecule, basis: &Basis, schwarz_threshold: f6
     Ok(p)
 }
 
-/// Generic closed-shell SCF with DIIS for the Fock matrix of theory.typ eq:fock-rks.
+/// Generic closed-shell SCF with DIIS for the Fock matrix of theory.typ eq:fock-rks
+/// (eq:cam-fock for a range-separated exchange kernel).
 pub fn run_scf(
     mol: &Molecule,
     basis: &Basis,
@@ -312,11 +335,17 @@ pub fn run_scf(
     }
     let u = &se.vectors;
     let x = Matrix::from_fn(n, n, |i, j| (0..n).map(|k| u[(i, k)] * u[(j, k)] / se.values[k].sqrt()).sum());
+    let eri = EriTensor::compute(basis, options.schwarz_threshold);
+    let kernel = xc.exchange_kernel();
+    // A second tensor only for a range-separated kernel (theory.typ eq:cam-k).
+    let exchange_eri = eri.exchange_tensor(basis, kernel, options.schwarz_threshold);
     let mut sys = ScfSystem {
         h: core_hamiltonian(basis, mol),
         s,
         x,
-        eri: EriTensor::compute(basis, options.schwarz_threshold),
+        eri,
+        kernel,
+        exchange_eri,
         e_nuc: mol.nuclear_repulsion(),
         xc,
     };

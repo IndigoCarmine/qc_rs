@@ -14,7 +14,9 @@ Windows・Linux・macOS のどれでも `cargo build` だけでビルドでき�
 - 元素は H–Ar。基底は STO-3G、6-31G、6-31G\*、6-31G\*\*（殻は d まで、d は既定で球面 5 成分、デカルト 6 成分も可）。
 - 2電子積分は8重対称性と Schwarz 選別を使ってすべてメモリに保持します（メモリは基底数の4乗に比例するため、小〜中程度の分子向け）。
   勾配の微分積分は保存せず、その場で縮約します。
-- 汎関数：HF、Slater、SVWN5、SVWN-RPA、B88、BLYP、B3LYP（VWN-RPA 版 = PySCF の `b3lypg`）、B3LYP5。
+- 汎関数：HF、Slater、SVWN5、SVWN-RPA、B88、BLYP、B3LYP（VWN-RPA 版 = PySCF の `b3lypg`）、B3LYP5、
+  CAM-B3LYP（距離分離混成。局所相関は VWN5 = PySCF の `camb3lyp`）。
+  CAM-B3LYP では誤差関数で減衰した2電子積分 erf(ωr)/r のテンソルをもう1つ持つので、2電子積分のメモリが2倍になります。
 - DFT の格子は Becke 分割＋Gauss–Chebyshev 動径格子＋**直積型の角度格子**（Gauss–Legendre × 等間隔 φ、Lebedev ではない）で、刈り込みはしません。
   勾配では格子重みの核座標微分を無視します。その誤差（合力が 0 からずれる大きさ）は細かい格子で 1e-9〜2e-6（最大は H2CO）、既定の格子で 1e-6 程度です。
 - 構造最適化は**デカルト座標の BFGS**（信頼半径つき）です。内部座標・対称性・遷移状態探索はありません。
@@ -52,7 +54,7 @@ XYZ ファイルは `Molecule::from_xyz(&text)` で読めます。勾配と最�
 低水準の関数（`run_rhf`、`run_rks`、`gradient::rhf_gradient`、`gradient::rks_gradient`、`bfgs_minimize` など）も公開しています。
 勾配の各項（1電子・2電子・重なり/W・交換相関・核間反発）は `GradientComponents` で個別に得られます。
 
-水分子の例（RHF/6-31G\* と B3LYP/6-31G の1点計算・勾配・構造最適化）：
+水分子の例（RHF/6-31G\*、B3LYP/6-31G、CAM-B3LYP/6-31G の1点計算・勾配・構造最適化）：
 
 ```sh
 cargo run --release --example h2o
@@ -123,9 +125,13 @@ RHF/6-31G と B3LYP/6-31G のエネルギーと勾配を PySCF の参照値と�
 | 最適化エネルギー | H2O・NH3 の RHF/6-31G\* | 4e-13 Eh |
 | 最適化エネルギー | H2O・NH3 の B3LYP/6-31G（PySCF は 99 × 590 格子） | 8.2e-9 Eh |
 | 最適化後の原子間距離 | 上の4件 | 4.2e-6 Bohr |
+| CAM-B3LYP 全エネルギー | 6（細かい格子） | 3.1e-8 Eh |
+| CAM-B3LYP 軌道エネルギー・双極子 | 同上 | 4.1e-8・9.5e-9 |
+| CAM-B3LYP 勾配 | 同上 | 1.5e-6 Eh/Bohr（H2CO。他は 4e-8 以下） |
+| CAM-B3LYP 最適化 | H2O（6-31G、PySCF は 99 × 590 格子） | エネルギー 8.4e-9 Eh、距離 9.2e-7 Bohr |
 
 PySCF に依存しない検査として、エネルギーの中心差分（h = 1e-3 Bohr）との差は RHF/6-31G\* で 1.5e-7
-（Richardson 外挿で 3e-10）、B3LYP/6-31G の細かい格子で 1.5e-7（同 2.5e-9）、既定の格子で 1.3e-6
+（Richardson 外挿で 3e-10）、B3LYP/6-31G の細かい格子で 1.5e-7（同 2.5e-9）、CAM-B3LYP/6-31G の細かい格子で 1.5e-7（同 1.6e-9）、既定の格子で 1.3e-6
 （格子重みの微分を無視しているため）です。RHF 勾配の並進・回転不変性（合力・トルク）は 1e-11 以下です。
 
 ## 支えているプロジェクト
@@ -169,6 +175,8 @@ Helgaker, Jørgensen & Olsen *Molecular Electronic-Structure Theory*（Wiley, 20
 - B. Miehlich, A. Savin, H. Stoll, H. Preuss, *Chem. Phys. Lett.* **157**, 200 (1989) — LYP から密度のラプラシアンを消した形。実装はこの閉殻形です。
 - A. D. Becke, *J. Chem. Phys.* **98**, 5648 (1993) — 厳密交換を混ぜる3パラメータ混成汎関数。
 - P. J. Stephens, F. J. Devlin, C. F. Chabalowski, M. J. Frisch, *J. Phys. Chem.* **98**, 11623 (1994) — その相関を LYP + VWN にした B3LYP。
+- H. Iikura, T. Tsuneda, T. Yanai, K. Hirao, *J. Chem. Phys.* **115**, 3540 (2001) — GGA 交換の長距離補正。誤差関数で分けた短距離部分の交換エネルギーを、汎関数の K_s と減衰因子で書く方法（短距離 B88 の式）。
+- T. Yanai, D. P. Tew, N. C. Handy, *Chem. Phys. Lett.* **393**, 51 (2004) — CAM-B3LYP。Coulomb 演算子を α + β erf(ωr) で分ける形と、そのパラメータ（α = 0.19、β = 0.46、ω = 0.33）。
 
 **数値積分格子**（`src/grid.rs`）
 

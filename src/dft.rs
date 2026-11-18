@@ -14,6 +14,7 @@ use crate::basis::Basis;
 use crate::error::Result;
 use crate::functional::Functional;
 use crate::grid::{GridSettings, MolecularGrid};
+use crate::integrals::ExchangeKernel;
 use crate::linalg::Matrix;
 use crate::molecule::Molecule;
 use crate::scf::{ExchangeCorrelation, ScfOptions, ScfResult, XcTerm, run_scf};
@@ -341,6 +342,10 @@ impl XcIntegrator {
 impl ExchangeCorrelation for XcIntegrator {
     fn exact_exchange_fraction(&self) -> f64 {
         self.functional.exact_exchange_fraction()
+    }
+
+    fn exchange_kernel(&self) -> ExchangeKernel {
+        self.functional.exchange_kernel()
     }
 
     fn evaluate(&mut self, density: &Matrix) -> Result<Option<XcTerm>> {

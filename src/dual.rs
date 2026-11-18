@@ -4,6 +4,8 @@
 //! `Dual::rho(ρ)` = (ρ, 1, 0) and `Dual::sigma(σ)` = (σ, 0, 1); evaluating an
 //! energy density written with these operations yields (f, ∂f/∂ρ, ∂f/∂σ).
 
+use crate::boys::boys;
+use std::f64::consts::PI;
 use std::ops::{Add, Div, Mul, Neg, Sub};
 
 /// x̂ = (x, x_ρ, x_σ). theory.typ eq:dual
@@ -74,6 +76,19 @@ impl Dual {
         self.chain(g, g)
     }
 
+    /// eˣ − 1, accurate for small |x| (same derivative as eˣ).
+    #[inline]
+    pub fn exp_m1(self) -> Self {
+        self.chain(self.v.exp_m1(), self.v.exp())
+    }
+
+    /// erf x = (2x/√π) F₀(x²) from the Boys function; erf'(x) = (2/√π) e^{−x²}.
+    /// theory.typ section 9 (short-range B88)
+    #[inline]
+    pub fn erf(self) -> Self {
+        self.chain(erf(self.v), 2.0 / PI.sqrt() * (-self.v * self.v).exp())
+    }
+
     /// ln x.
     #[inline]
     pub fn ln(self) -> Self {
@@ -98,6 +113,13 @@ impl Dual {
         let g = 1.0 / self.v;
         self.chain(g, -g * g)
     }
+}
+
+/// erf x = (2x/√π) F₀(x²) (Boys function, theory.typ eq:boys).
+pub fn erf(x: f64) -> f64 {
+    let mut f = [0.0];
+    boys(0, x * x, &mut f);
+    2.0 * x / PI.sqrt() * f[0]
 }
 
 impl From<f64> for Dual {
@@ -199,11 +221,41 @@ mod tests {
     }
 
     #[test]
+    fn erf_values_and_derivative() {
+        // Reference values of erf (Abramowitz & Stegun table 7.1 / 20-digit values).
+        let table = [
+            (0.0, 0.0),
+            (1e-10, 1.1283791670955126e-10),
+            (0.1, 0.1124629160182849),
+            (0.5, 0.5204998778130465),
+            (1.0, 0.8427007929497149),
+            (2.0, 0.9953222650189527),
+            (3.0, 0.9999779095030014),
+            (5.0, 0.9999999999984626),
+            (6.0, 1.0),
+            (40.0, 1.0),
+        ];
+        for (x, e) in table {
+            // A few units in the last place (F₀ is accurate to ~1e-15 relative).
+            assert!((erf(x) - e).abs() <= 1e-15 * e, "erf({x}) = {} vs {e}", erf(x));
+            assert_eq!(erf(-x), -erf(x));
+        }
+        // Derivative against central differences, across the Boys-function switch at x² = 35.
+        for x in [-2.0, 0.01, 0.3, 1.0, 1.7, 2.5, 35f64.sqrt() - 1e-3, 35f64.sqrt() + 1e-3, 7.0] {
+            let d = Dual::rho(x).erf();
+            let h = 1e-5;
+            let fd = (erf(x + h) - erf(x - h)) / (2.0 * h);
+            // Rounding in the difference quotient limits the comparison to ~1e-11 absolute.
+            assert!((d.d_rho - fd).abs() < 1e-9 * fd.abs() + 1e-10, "x={x}: {} vs {fd}", d.d_rho);
+        }
+    }
+
+    #[test]
     fn elementary_derivatives() {
         let x = 0.37;
         let h = 1e-6;
         type Case = (&'static str, fn(Dual) -> Dual, fn(f64) -> f64);
-        let cases: [Case; 9] = [
+        let cases: [Case; 11] = [
             ("powf", |d| d.powf(-1.0 / 3.0), |v| v.powf(-1.0 / 3.0)),
             ("powi", |d| d.powi(5), |v| v.powi(5)),
             ("sqrt", |d| d.sqrt(), |v| v.sqrt()),
@@ -213,6 +265,8 @@ mod tests {
             ("atan", |d| d.atan(), |v| v.atan()),
             ("asinh", |d| d.asinh(), |v| v.asinh()),
             ("recip", |d| d.recip(), |v| 1.0 / v),
+            ("exp_m1", |d| d.exp_m1(), |v| v.exp_m1()),
+            ("erf", |d| d.erf(), erf),
         ];
         for (name, fd, fv) in cases {
             let d = fd(Dual::sigma(x));

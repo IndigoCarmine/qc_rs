@@ -45,7 +45,7 @@ fn optimizations_match_pyscf() {
     let reference = load_reference();
     let mut failures = Vec::new();
     let entries = reference["optimizations"].as_array().unwrap();
-    assert_eq!(entries.len(), 4);
+    assert_eq!(entries.len(), 5);
     for entry in entries {
         let name = entry["name"].as_str().unwrap();
         let basis = entry["basis"].as_str().unwrap();
@@ -63,7 +63,8 @@ fn optimizations_match_pyscf() {
             .collect();
         let mol = Molecule::from_symbols(&symbols, &coords, Unit::Bohr, 0).unwrap();
         let is_hf = method == "rhf";
-        // PySCF used a (99, 590) grid for the DFT optimizations; we use our fine grid.
+        // PySCF used a (99, 590) grid for the DFT optimizations (B3LYP and CAM-B3LYP);
+        // we use our fine grid.
         let calc = Calculation::new(&mol, if is_hf { "hf" } else { method }, basis)
             .unwrap()
             .with_grid(GridSettings::fine());

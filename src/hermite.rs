@@ -306,13 +306,44 @@ pub struct Primitive {
     pub lmn: [usize; 3],
 }
 
+/// Exponent α' and prefactor factor √(ω²/(α + ω²)) that turn the Coulomb integral
+/// with Gaussian-product exponent α = pq/(p+q) into the erf(ωr)/r integral.
+/// theory.typ eq:eri-erf. ω = ∞ gives (α, 1), i.e. the Coulomb integral.
+#[inline]
+pub fn erf_attenuation(alpha: f64, omega: f64) -> (f64, f64) {
+    if omega.is_infinite() {
+        return (alpha, 1.0);
+    }
+    let w2 = omega * omega;
+    let d = alpha + w2;
+    (alpha * w2 / d, (w2 / d).sqrt())
+}
+
 /// Two-electron integral (g_a g_b | g_c g_d) of unnormalized primitives. theory.typ eq:eri
 pub fn eri_primitive(ga: &Primitive, gb: &Primitive, gc: &Primitive, gd: &Primitive) -> f64 {
+    eri_primitive_kernel(ga, gb, gc, gd, None)
+}
+
+/// Attenuated two-electron integral (g_a g_b | erf(ω r₁₂)/r₁₂ | g_c g_d) of unnormalized
+/// primitives. theory.typ eq:eri-erf
+pub fn eri_primitive_erf(ga: &Primitive, gb: &Primitive, gc: &Primitive, gd: &Primitive, omega: f64) -> f64 {
+    eri_primitive_kernel(ga, gb, gc, gd, Some(omega))
+}
+
+/// 1/r (`omega = None`, eq:eri) or erf(ωr)/r (eq:eri-erf) integral of four primitives.
+fn eri_primitive_kernel(ga: &Primitive, gb: &Primitive, gc: &Primitive, gd: &Primitive, omega: Option<f64>) -> f64 {
     let ab = PrimitivePair::new(ga.exponent, ga.center, lmax(ga.lmn), gb.exponent, gb.center, lmax(gb.lmn));
     let cd = PrimitivePair::new(gc.exponent, gc.center, lmax(gc.lmn), gd.exponent, gd.center, lmax(gd.lmn));
     let (la, lb, lc, ld) = (ga.lmn, gb.lmn, gc.lmn, gd.lmn);
     let (p, q) = (ab.p, cd.p);
-    let alpha = p * q / (p + q);
+    let mut alpha = p * q / (p + q);
+    let mut pref = 2.0 * PI.powf(2.5) / (p * q * (p + q).sqrt());
+    if let Some(w) = omega {
+        // theory.typ eq:eri-erf: same Hermite sums with α' and an extra prefactor.
+        let (a_eff, scale) = erf_attenuation(alpha, w);
+        alpha = a_eff;
+        pref *= scale;
+    }
     let pq = [0, 1, 2].map(|k| ab.center[k] - cd.center[k]);
     let mut r = HermiteR::new();
     r.compute(ltot(la) + ltot(lb) + ltot(lc) + ltot(ld), alpha, pq);
@@ -336,7 +367,7 @@ pub fn eri_primitive(ga: &Primitive, gb: &Primitive, gc: &Primitive, gd: &Primit
             }
         }
     }
-    2.0 * PI.powf(2.5) / (p * q * (p + q).sqrt()) * sum
+    pref * sum
 }
 
 #[cfg(test)]
@@ -439,5 +470,97 @@ mod tests {
         boys(0, alpha * r2, &mut f);
         let exact = 2.0 * PI.powf(2.5) / (p * q * (p + q).sqrt()) * kab * kcd * f[0];
         assert!((eri_primitive(&ga, &gb, &gc, &gd) - exact).abs() < 1e-14);
+    }
+
+    /// erf(x) by composite Simpson quadrature of (2/√π) ∫₀ˣ e^{-t²} dt (independent of
+    /// the Boys function).
+    fn erf_quad(x: f64) -> f64 {
+        let m = 20_000;
+        let h = x / m as f64;
+        let mut s = 0.0;
+        for i in 0..=m {
+            let w = if i == 0 || i == m { 1.0 } else if i % 2 == 1 { 4.0 } else { 2.0 };
+            s += w * (-(i as f64 * h).powi(2)).exp();
+        }
+        2.0 / PI.sqrt() * s * h / 3.0
+    }
+
+    fn s_prims() -> [Primitive; 4] {
+        let g = |e: f64, c: [f64; 3]| Primitive { exponent: e, center: c, lmn: [0, 0, 0] };
+        [g(0.5, [0.0; 3]), g(1.2, [0.0, 0.0, 1.0]), g(0.8, [0.5, 0.2, 0.0]), g(2.0, [-0.3, 0.0, 0.4])]
+    }
+
+    #[test]
+    fn eri_erf_ssss_closed_form() {
+        // Two s-type charge distributions K_ab e^{-p r_P²}, K_cd e^{-q r_Q²}: convolving the
+        // Gaussians gives (π²/pq)^{3/2} K_ab K_cd erf(√α' R)/R with 1/α' = 1/p + 1/q + 1/ω²
+        // (the erf(ωr)/r kernel is the Coulomb potential of a Gaussian of exponent ω²).
+        let [ga, gb, gc, gd] = s_prims();
+        let pair = |x: &Primitive, y: &Primitive| {
+            let p = x.exponent + y.exponent;
+            let c = [0, 1, 2].map(|k| (x.exponent * x.center[k] + y.exponent * y.center[k]) / p);
+            let d2: f64 = (0..3).map(|k| (x.center[k] - y.center[k]).powi(2)).sum();
+            (p, c, (-x.exponent * y.exponent / p * d2).exp())
+        };
+        let (p, pc, kab) = pair(&ga, &gb);
+        let (q, qc, kcd) = pair(&gc, &gd);
+        let r: f64 = (0..3).map(|k| (pc[k] - qc[k]).powi(2)).sum::<f64>().sqrt();
+        for omega in [0.05, 0.33, 1.0, 4.0, 30.0] {
+            let a_eff = 1.0 / (1.0 / p + 1.0 / q + 1.0 / (omega * omega));
+            let exact = (PI * PI / (p * q)).powf(1.5) * kab * kcd * erf_quad(a_eff.sqrt() * r) / r;
+            let v = eri_primitive_erf(&ga, &gb, &gc, &gd, omega);
+            assert!((v - exact).abs() < 1e-13 * exact.abs(), "ω={omega}: {v} vs {exact}");
+        }
+        // Same centres (R = 0): (π²/pq)^{3/2} K K 2√(α'/π).
+        let g0 = |e: f64| Primitive { exponent: e, center: [0.1, 0.2, 0.3], lmn: [0, 0, 0] };
+        let (p, q, omega) = (0.9 + 1.4, 0.6 + 2.2, 0.7);
+        let a_eff = 1.0 / (1.0 / p + 1.0 / q + 1.0 / (omega * omega));
+        let exact = (PI * PI / (p * q)).powf(1.5) * 2.0 * (a_eff / PI).sqrt();
+        let v = eri_primitive_erf(&g0(0.9), &g0(1.4), &g0(0.6), &g0(2.2), omega);
+        assert!((v - exact).abs() < 1e-14 * exact, "{v} vs {exact}");
+    }
+
+    #[test]
+    fn eri_erf_limits() {
+        // ω → ∞ gives the Coulomb integral, ω → 0 gives 0 (linearly in ω), for p and d
+        // functions as well as s.
+        let g = |e: f64, c: [f64; 3], lmn: [usize; 3]| Primitive { exponent: e, center: c, lmn };
+        let sets = [
+            s_prims(),
+            [
+                g(0.7, [0.1, -0.2, 0.3], [1, 0, 1]),
+                g(1.1, [-0.4, 0.5, 0.2], [0, 2, 0]),
+                g(0.5, [0.6, 0.1, -0.5], [0, 0, 1]),
+                g(1.6, [0.0, 0.3, 0.4], [1, 1, 0]),
+            ],
+        ];
+        for [ga, gb, gc, gd] in sets {
+            let coul = eri_primitive(&ga, &gb, &gc, &gd);
+            assert_eq!(eri_primitive_erf(&ga, &gb, &gc, &gd, f64::INFINITY), coul);
+            let big = eri_primitive_erf(&ga, &gb, &gc, &gd, 1e7);
+            assert!((big - coul).abs() < 1e-12 * coul.abs(), "{big} vs {coul}");
+            let small = eri_primitive_erf(&ga, &gb, &gc, &gd, 1e-8);
+            assert!(small.abs() < 1e-7 * coul.abs(), "{small}");
+            // Leading behaviour is linear in ω.
+            let s2 = eri_primitive_erf(&ga, &gb, &gc, &gd, 2e-8);
+            assert!((s2 - 2.0 * small).abs() < 1e-6 * small.abs(), "{small} {s2}");
+        }
+    }
+
+    #[test]
+    fn eri_erf_center_derivative_rule() {
+        // eq:center-deriv holds for the attenuated integral: analytic ∂/∂A_x from L ± 1
+        // primitives vs central finite differences.
+        let omega = 0.33;
+        let g = |e: f64, c: [f64; 3], lmn: [usize; 3]| Primitive { exponent: e, center: c, lmn };
+        let (a, la) = (0.7, [1, 0, 1]);
+        let ra = [0.1, -0.2, 0.3];
+        let (gb, gc, gd) =
+            (g(1.1, [-0.4, 0.5, 0.2], [0, 2, 0]), g(0.5, [0.6, 0.1, -0.5], [0, 0, 1]), g(1.6, [0.0, 0.3, 0.4], [1, 0, 0]));
+        let e = |x: f64, l: [usize; 3]| eri_primitive_erf(&g(a, [ra[0] + x, ra[1], ra[2]], l), &gb, &gc, &gd, omega);
+        let h = 1e-5;
+        let fd = (e(h, la) - e(-h, la)) / (2.0 * h);
+        let an = 2.0 * a * e(0.0, [2, 0, 1]) - e(0.0, [0, 0, 1]);
+        assert!((fd - an).abs() < 1e-9, "{fd} vs {an}");
     }
 }

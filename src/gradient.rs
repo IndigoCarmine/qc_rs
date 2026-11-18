@@ -6,7 +6,8 @@
 //! * one-electron: Σ P h^(X) — kinetic energy (eq:dS form) and nuclear attraction,
 //!   including the operator ("Hellmann–Feynman") part via translational invariance
 //!   (eq:hf-force);
-//! * two-electron: Σ Γ (μν|λσ)^(X) with Γ of eq:gamma;
+//! * two-electron: Σ Γ (μν|λσ)^(X) with Γ of eq:gamma; for a range-separated exchange
+//!   kernel also the attenuated integrals of eq:cam-grad;
 //! * overlap: -Σ W S^(X) with the energy-weighted density W of eq:W;
 //! * exchange–correlation: eq:xc-grad (grid-weight derivatives neglected);
 //! * nuclear repulsion: eq:vnn-grad.
@@ -35,8 +36,8 @@ use crate::ao_eval::{D_X, eval_ao_shells, hessian_component};
 use crate::basis::{Basis, CART_TO_SPH_D, cartesian_components, cartesian_norm};
 use crate::dft::{XcIntegrator, density_on_points, xc_on_points};
 use crate::error::{QcError, Result};
-use crate::hermite::{HermiteR, PrimitivePair};
-use crate::integrals::{cartesian_schwarz_factors, pair_index};
+use crate::hermite::{HermiteR, PrimitivePair, erf_attenuation};
+use crate::integrals::{ExchangeKernel, cartesian_schwarz_factors, pair_index};
 use crate::linalg::Matrix;
 use crate::molecule::Molecule;
 use crate::scf::ScfResult;
@@ -54,7 +55,8 @@ pub const GRADIENT_SCREENING_THRESHOLD: f64 = 1e-14;
 pub struct GradientComponents {
     /// Σ P h^(X): kinetic energy and nuclear attraction (basis-centre and operator parts).
     pub one_electron: Vec<[f64; 3]>,
-    /// Σ Γ (μν|λσ)^(X): Coulomb and a_HF-scaled exact exchange.
+    /// Σ Γ (μν|λσ)^(X): Coulomb and exact exchange (a_HF-scaled, or with the kernel
+    /// [α + β erf(ωr)]/r of eq:cam-grad).
     pub two_electron: Vec<[f64; 3]>,
     /// -Σ W S^(X).
     pub overlap: Vec<[f64; 3]>,
@@ -424,7 +426,16 @@ fn dot(a: &[f64], b: &[f64]) -> f64 {
 /// * Z_C[ab][j] likewise with the ket's C-derivative coefficients,
 ///   Q[ab][j] = Σ_i E^{ab}_i[ab] X_ij, and ∂/∂C = pref Σ_{ab,j} Z_C[ab][j] Q[ab][j];
 /// * ∂/∂D = −(∂/∂A + ∂/∂B + ∂/∂C) (translational invariance).
-fn quartet_gradient(ab: &GradPair, cd: &GradPair, g: &[f64], s: &mut QuartetScratch) -> [[f64; 3]; 4] {
+///
+/// `omega = Some(ω)` uses the operator erf(ωr)/r instead of 1/r (theory.typ eq:eri-erf;
+/// the centre-derivative rule is unchanged).
+fn quartet_gradient(
+    ab: &GradPair,
+    cd: &GradPair,
+    g: &[f64],
+    omega: Option<f64>,
+    s: &mut QuartetScratch,
+) -> [[f64; 3]; 4] {
     let (nab, ncd) = (ab.ncomp, cd.ncomp);
     let (ni, ni1) = (n_hermite(ab.lab), n_hermite(ab.lab + 1));
     let (nj, nj1) = (n_hermite(cd.lab), n_hermite(cd.lab + 1));
@@ -462,10 +473,16 @@ fn quartet_gradient(ab: &GradPair, cd: &GradPair, g: &[f64], s: &mut QuartetScra
         }
         for pa in &ab.prims {
             let (p, q) = (pa.p, pc.p);
-            let alpha = p * q / (p + q);
+            let mut alpha = p * q / (p + q);
             let pq = [0, 1, 2].map(|k| pa.center[k] - pc.center[k]);
+            let mut pref = 2.0 * PI.powf(2.5) / (p * q * (p + q).sqrt());
+            if let Some(w) = omega {
+                // theory.typ eq:eri-erf
+                let (a_eff, scale) = erf_attenuation(alpha, w);
+                alpha = a_eff;
+                pref *= scale;
+            }
             s.r.compute(ltot, alpha, pq);
-            let pref = 2.0 * PI.powf(2.5) / (p * q * (p + q).sqrt());
             let rdata = s.r.as_slice();
             s.rmat.clear();
             s.rmat.extend(s.ridx.iter().map(|&ix| if ix == usize::MAX { 0.0 } else { rdata[ix] }));
@@ -509,8 +526,21 @@ fn quartet_gradient(ab: &GradPair, cd: &GradPair, g: &[f64], s: &mut QuartetScra
 
 /// Σ_μνλσ Γ_μνλσ (μν|λσ)^(X) with Γ = ½[P_μν P_λσ − (a_HF/2) P_μλ P_νσ] for a
 /// symmetric AO density `p`. theory.typ eq:grad (second term), eq:gamma
-pub fn two_electron_gradient(mol: &Molecule, basis: &Basis, p: &Matrix, a_hf: f64) -> Result<Vec<[f64; 3]>> {
+///
+/// `exchange` is a_HF (an `f64`) or an [`ExchangeKernel`]; for a range-separated
+/// kernel the exchange part becomes −¼ Σ P_μλ P_νσ [α (μν|λσ)^(X) + β (μν|λσ)_ω^(X)]
+/// (theory.typ eq:cam-grad).
+pub fn two_electron_gradient(
+    mol: &Molecule,
+    basis: &Basis,
+    p: &Matrix,
+    exchange: impl Into<ExchangeKernel>,
+) -> Result<Vec<[f64; 3]>> {
     check_square(p, basis.nao(), "density matrix")?;
+    let kernel: ExchangeKernel = exchange.into();
+    let a_hf = kernel.alpha;
+    // Attenuated exchange part (theory.typ eq:cam-grad), if any.
+    let erf_part = kernel.is_range_separated().then_some((kernel.beta, kernel.omega));
     let natom = mol.atoms().len();
     let shells = basis.shells();
     let pc = to_cartesian(basis, p);
@@ -545,8 +575,13 @@ pub fn two_electron_gradient(mol: &Molecule, basis: &Basis, p: &Matrix, a_hf: f6
             let (a, b) = (ab.sa, ab.sb);
             for (kl, cd) in pairs[..=ij].iter().enumerate() {
                 let (c, d) = (cd.sa, cd.sb);
-                let gmax = 0.5 * (pm(a, b) * pm(c, d) + 0.5 * a_hf.abs() * (pm(a, c) * pm(b, d)).max(pm(a, d) * pm(b, c)));
-                if q[ij] * q[kl] * gmax < GRADIENT_SCREENING_THRESHOLD {
+                let pexch = (pm(a, c) * pm(b, d)).max(pm(a, d) * pm(b, c));
+                let gmax = 0.5 * (pm(a, b) * pm(c, d) + 0.5 * a_hf.abs() * pexch);
+                // The attenuated integrals are bounded by the Coulomb ones
+                // ((μν|μν)_ω <= (μν|μν)), so Q screens them too.
+                let erf_screened =
+                    erf_part.is_none_or(|(beta, _)| q[ij] * q[kl] * 0.25 * beta.abs() * pexch < GRADIENT_SCREENING_THRESHOLD);
+                if q[ij] * q[kl] * gmax < GRADIENT_SCREENING_THRESHOLD && erf_screened {
                     continue;
                 }
                 // Multiplicity of the shell quartet among all ordered quartets (eq:eri-sym).
@@ -580,11 +615,38 @@ pub fn two_electron_gradient(mol: &Molecule, basis: &Basis, p: &Matrix, a_hf: f6
                     }
                 }
                 let gamma = std::mem::take(&mut s.gamma);
-                let f = quartet_gradient(ab, cd, &gamma, s);
+                let f = quartet_gradient(ab, cd, &gamma, None, s);
                 s.gamma = gamma;
-                for (atom, fk) in [shells[a].atom, shells[b].atom, shells[c].atom, shells[d].atom].into_iter().zip(f) {
+                let atoms = [shells[a].atom, shells[b].atom, shells[c].atom, shells[d].atom];
+                for (&atom, fk) in atoms.iter().zip(f) {
                     for k in 0..3 {
                         grad[atom][k] += fk[k];
+                    }
+                }
+                if let Some((beta, omega)) = erf_part.filter(|_| !erf_screened) {
+                    // Γ_ω = −(β/4) P_μλ P_νσ, symmetrized (theory.typ eq:cam-grad).
+                    s.gamma.clear();
+                    for x in 0..na {
+                        let mu = coff[a] + x;
+                        for y in 0..nb {
+                            let nu = coff[b] + y;
+                            for z in 0..nc {
+                                let la = coff[c] + z;
+                                for w in 0..nd {
+                                    let si = coff[d] + w;
+                                    let exch = pc[(mu, la)] * pc[(nu, si)] + pc[(mu, si)] * pc[(nu, la)];
+                                    s.gamma.push(deg * 0.5 * (-0.25 * beta * exch));
+                                }
+                            }
+                        }
+                    }
+                    let gamma = std::mem::take(&mut s.gamma);
+                    let f = quartet_gradient(ab, cd, &gamma, Some(omega), s);
+                    s.gamma = gamma;
+                    for (&atom, fk) in atoms.iter().zip(f) {
+                        for k in 0..3 {
+                            grad[atom][k] += fk[k];
+                        }
                     }
                 }
             }
@@ -705,7 +767,7 @@ fn scf_gradient(
     mol: &Molecule,
     basis: &Basis,
     scf: &ScfResult,
-    a_hf: f64,
+    exchange: ExchangeKernel,
     xc: Option<&XcIntegrator>,
 ) -> Result<GradientComponents> {
     let n = basis.nao();
@@ -717,7 +779,7 @@ fn scf_gradient(
     let pc = to_cartesian(basis, &scf.density);
     let wc = to_cartesian(basis, &w);
     let (one_electron, overlap) = one_electron_terms(mol, basis, OneElectronRequest { p: Some(&pc), w: Some(&wc) });
-    let two_electron = two_electron_gradient(mol, basis, &scf.density, a_hf)?;
+    let two_electron = two_electron_gradient(mol, basis, &scf.density, exchange)?;
     let xc_part = match xc {
         Some(x) => xc_gradient(mol, basis, x, &scf.density)?,
         None => vec![[0.0; 3]; mol.atoms().len()],
@@ -734,15 +796,15 @@ fn scf_gradient(
 /// Analytic RHF gradient (theory.typ eq:grad with a_HF = 1, no E_xc) for a converged
 /// SCF result of `mol` in `basis`.
 pub fn rhf_gradient(mol: &Molecule, basis: &Basis, scf: &ScfResult) -> Result<GradientComponents> {
-    scf_gradient(mol, basis, scf, 1.0, None)
+    scf_gradient(mol, basis, scf, ExchangeKernel::global(1.0), None)
 }
 
-/// Analytic RKS gradient (theory.typ eq:grad) for a converged SCF result obtained
-/// with the integrator `xc` (functional, grid and basis of the SCF). Works for any
-/// functional, including pure HF (`Functional::hf()`, no grid contribution).
+/// Analytic RKS gradient (theory.typ eq:grad, eq:cam-grad) for a converged SCF result
+/// obtained with the integrator `xc` (functional, grid and basis of the SCF). Works for
+/// any functional, including pure HF (`Functional::hf()`, no grid contribution) and
+/// range-separated hybrids.
 pub fn rks_gradient(mol: &Molecule, basis: &Basis, scf: &ScfResult, xc: &XcIntegrator) -> Result<GradientComponents> {
-    let a_hf = xc.functional().exact_exchange_fraction();
-    scf_gradient(mol, basis, scf, a_hf, Some(xc))
+    scf_gradient(mol, basis, scf, xc.functional().exchange_kernel(), Some(xc))
 }
 
 #[cfg(test)]
@@ -788,9 +850,11 @@ mod tests {
             let p = test_matrix(n, 1);
             let w = test_matrix(n, 2);
             let a_hf = 0.7;
+            let kernel = ExchangeKernel { alpha: 0.19, beta: 0.46, omega: 0.33 };
             let g1 = one_electron_gradient(&m0, &b0, &p).unwrap();
             let gs = overlap_gradient(&m0, &b0, &w).unwrap();
             let g2 = two_electron_gradient(&m0, &b0, &p, a_hf).unwrap();
+            let g3 = two_electron_gradient(&m0, &b0, &p, kernel).unwrap();
             let x0 = m0.coordinates();
             let f1 = |x: &[f64]| {
                 let m = mol_at(x);
@@ -802,11 +866,19 @@ mod tests {
                 let (j, k) = eri.coulomb_exchange(&p, true);
                 0.5 * p.dot(&j) - 0.25 * a_hf * p.dot(&k.unwrap())
             };
+            // theory.typ eq:cam-k, eq:cam-fock: ½ P·J − ¼ P·K^x.
+            let f3 = |x: &[f64]| {
+                let b = basis(&mol_at(x), cart);
+                let eri = EriTensor::compute(&b, 0.0);
+                let (j, _) = eri.coulomb_exchange(&p, false);
+                let kx = eri.exchange_tensor(&b, kernel, 0.0).unwrap().exchange(&p);
+                0.5 * p.dot(&j) - 0.25 * p.dot(&kx)
+            };
             let h = 1e-4;
-            let mut worst = [0.0f64; 3];
+            let mut worst = [0.0f64; 4];
             type EnergyFn<'a> = &'a dyn Fn(&[f64]) -> f64;
-            let fns: [EnergyFn; 3] = [&f1, &fs, &f2];
-            let grads = [&g1, &gs, &g2];
+            let fns: [EnergyFn; 4] = [&f1, &fs, &f2, &f3];
+            let grads = [&g1, &gs, &g2, &g3];
             for i in 0..x0.len() {
                 let (mut xp, mut xm) = (x0.clone(), x0.clone());
                 xp[i] += h;
@@ -819,7 +891,13 @@ mod tests {
                     assert!(dev < 2e-7 * fd.abs().max(1.0), "cart={cart} term {t} coord {i}: {} vs fd {fd}", g[a][k]);
                 }
             }
-            println!("cart={cart}: worst |analytic - FD| one-electron {:.1e}, overlap {:.1e}, two-electron {:.1e}", worst[0], worst[1], worst[2]);
+            println!(
+                "cart={cart}: worst |analytic - FD| one-electron {:.1e}, overlap {:.1e}, two-electron {:.1e}, \
+                 range-separated two-electron {:.1e}",
+                worst[0], worst[1], worst[2], worst[3]
+            );
+            // A kernel with β = 0 is the a_HF form, bit for bit.
+            assert_eq!(two_electron_gradient(&m0, &b0, &p, ExchangeKernel::global(a_hf)).unwrap(), g2);
         }
     }
 
@@ -831,7 +909,7 @@ mod tests {
         let b0 = basis(&m0, false);
         let p = crate::scf::run_rhf(&m0, &b0, &crate::scf::ScfOptions::default()).unwrap().density;
         let grid = MolecularGrid::new(&m0, GridSettings { n_radial: 60, n_theta: 14 }).unwrap();
-        for fun in [Functional::svwn5(), Functional::b3lyp()] {
+        for fun in [Functional::svwn5(), Functional::b3lyp(), Functional::cam_b3lyp()] {
             let xc0 = XcIntegrator::with_grid(&b0, &fun, grid.clone(), Default::default()).unwrap();
             let g = xc_gradient(&m0, &b0, &xc0, &p).unwrap();
             let x0 = m0.coordinates();

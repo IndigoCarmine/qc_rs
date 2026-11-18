@@ -458,6 +458,100 @@ $ a = 0.04918, quad b = 0.132, quad c = 0.2533, quad d = 0.349 $
 B3LYP は Gaussian と同じ VWN-RPA 版（Stephens ら 1994）、B3LYP5 は VWN5 版である。
 実装は「$f$ の線形結合（係数と成分の列）＋ $a_"HF"$」という一般形にしておく。
 
+= 距離分離混成汎関数（CAM-B3LYP） <sec:cam>
+
+== 演算子の分割
+
+電子間の Coulomb 演算子を、誤差関数で短距離部分と長距離部分に分ける（Yanai, Tew, Handy 2004）：
+
+$ 1 / r_(12) = (1 - [alpha + beta erf(omega r_(12))]) / r_(12) + (alpha + beta erf(omega r_(12))) / r_(12) $ <eq:cam-split>
+
+第2項を厳密交換（Hartree–Fock 型）で、第1項を密度汎関数の交換で扱う。厳密交換の割合は
+近距離で $alpha$、遠距離で $alpha + beta$ になる。$beta = 0$ なら通常の混成汎関数（$a_"HF" = alpha$）に戻る。
+Coulomb 項 $J$ は分割しない。
+
+== 厳密交換
+
+交換行列を、減衰した積分を含む形に一般化する：
+
+$ K_(mu nu)^"x" = sum_(lambda sigma) P_(lambda sigma)
+  [alpha (mu lambda | nu sigma) + beta (mu lambda | nu sigma)_omega], quad
+  (mu nu | lambda sigma)_omega = integral.double chi_mu chi_nu erf(omega r_(12)) / r_(12) chi_lambda chi_sigma $ <eq:cam-k>
+
+@eq:fock-rks と @eq:e-rks の $a_"HF" K$ を $K^"x"$ に置き換える：
+
+$ F = h + J - 1/2 K^"x" + V^"xc", quad
+  E = sum P h + 1/2 sum P J - 1/4 sum_(mu nu) P_(mu nu) K_(mu nu)^"x" + E_"xc" + V_"nn" $ <eq:cam-fock>
+
+実装では核 $[alpha + beta erf(omega r)] slash r$ の積分を1つのテンソルとして持てばよい
+（$beta = 0$ のときは通常の積分の $alpha$ 倍で、追加のテンソルは要らない）。
+
+== 減衰した2電子積分
+
+$erf(omega r) slash r$ の積分は、@eq:eri で Boys 関数の引数と前因子を変えるだけで得られる。
+$alpha_"PQ" = p q slash (p + q)$ として
+
+$ alpha' = (alpha_"PQ" omega^2) / (alpha_"PQ" + omega^2), quad
+  (g_a g_b | g_c g_d)_omega = (2 pi^(5 slash 2)) / (p q sqrt(p + q)) sqrt(omega^2 / (alpha_"PQ" + omega^2))
+  sum_(t u v) E_(t u v)^(a b) sum_(tau nu phi) (-1)^(tau + nu + phi) E_(tau nu phi)^(c d)
+  R_(t + tau, u + nu, v + phi)(alpha', vb(P) - vb(Q)) $ <eq:eri-erf>
+
+（Hermite 展開係数 $E$ は変わらない。$omega -> infinity$ で @eq:eri に戻る。）
+これは $erf(omega r) slash r = (2 slash sqrt(pi)) integral_0^omega e^(-t^2 r^2) dif t$ から従う。
+8重対称性 @eq:eri-sym と Schwarz の不等式 @eq:schwarz は減衰した積分にもそのまま成り立つ
+（$erf(omega r) slash r$ は正定値の核である）。中心微分 @eq:center-deriv も同じ規則で求まる。
+
+== 短距離 B88 交換
+
+交換汎関数を $E_x = -1/2 sum_s integral rho_s^(4 slash 3) K_s dif vb(r)$ と書いたときの $K_s$ を使い、
+Iikura ら（2001）の方法で @eq:cam-split の第1項に対応する交換エネルギーを作る。B88 では
+
+$ K_s = 2 [3/2 (3 / (4 pi))^(1 slash 3) + beta_"B88" x_s^2 / (1 + 6 beta_"B88" x_s asinh(x_s))], quad
+  x_s = abs(nabla rho_s) / rho_s^(4 slash 3), quad beta_"B88" = 0.0042 $ <eq:cam-K>
+
+$ a_s = (omega sqrt(K_s)) / (6 sqrt(pi) rho_s^(1 slash 3)), quad
+  b_s = exp(-1 / (4 a_s^2)) - 1, quad c_s = 2 a_s^2 b_s + 1/2 $ <eq:cam-a>
+
+$ A(a) = 8/3 a [sqrt(pi) erf(1 / (2a)) + 2a (b - c)] $ <eq:cam-att>
+
+$ f_x^"CAM-B88" = -sum_s 1/2 rho_s^(4 slash 3) K_s [1 - alpha - beta A(a_s)]
+  = -(rho / 2)^(4 slash 3) K [1 - alpha - beta A(a)] quad ("閉殻、" rho_s = rho slash 2, abs(nabla rho_s) = sqrt(sigma) slash 2) $ <eq:cam-b88>
+
+$A(a)$ は交換のうち長距離側に回る割合で、$a -> 0$（高密度）で $0$、$a -> infinity$（低密度）で $1$ に近づく。
+$alpha = beta = 0$ なら $f_x^"CAM-B88" = f_x^"B88"$ である。
+
+*数値上の注意。* $a$ が大きいと @eq:cam-att は桁落ちする（$1 - A$ の相対誤差は $a = 1$ で $10^(-14)$、
+$a = 6$ で $10^(-11)$ 程度）。そこで $a >= 0.5$ では、$u = 1 slash (4 a^2)$ についての級数
+
+$ 1 - A(a) = sum_(n=1)^infinity (-1)^(n+1) (2 u^n) / (n! thin (2n+1)(n+1)(n+2))
+  = 1 / (36 a^2) - 1 / (960 a^4) + 1 / (26880 a^6) - 1 / (829440 a^8) + dots.c $ <eq:cam-series>
+
+を項が丸め誤差以下になるまで足す（すべての $a$ で収束し、$a = 0.5$ で約 17 項）。
+級数は 60 桁の多倍長計算で @eq:cam-att と照合済みで、$a in [0.25, 1]$ では両者が $3 times 10^(-14)$ 以内で一致する。
+$a < 0.5$ では @eq:cam-att を直接使い、$b$ は $e^x - 1$ を桁落ちなく求める関数（`exp_m1`）で計算する。
+$1 slash (4a^2) > 700$ となるところでは $b = -1$、$erf = 1$ としてよい。
+
+$erf$ は Boys 関数から求める： $erf(z) = (2z slash sqrt(pi)) F_0 (z^2)$。
+双対数 @eq:dual には $erf'(z) = (2 slash sqrt(pi)) e^(-z^2)$ を加える。
+
+== CAM-B3LYP の定義
+
+$ f^"CAM-B3LYP" = f_x^"CAM-B88" + 0.81 f_c^"LYP" + 0.19 f_c^"VWN5", quad
+  alpha = 0.19, quad beta = 0.46, quad omega = 0.33 thin a_0^(-1) $ <eq:cam-b3lyp>
+
+（相関の局所部分は VWN5。）実装の一般形は「$f$ の線形結合 ＋ 厳密交換の核 $(alpha, beta, omega)$」とし、
+これまでの $a_"HF"$ は $alpha = a_"HF"$、$beta = 0$ に当たる。
+
+== 勾配
+
+@eq:grad と @eq:gamma の交換部分を、減衰した積分の微分に置き換える：
+
+$ 1/2 sum_(mu nu lambda sigma) P_(mu nu) P_(lambda sigma) (mu nu | lambda sigma)^((X_A))
+  - 1/4 sum_(mu nu lambda sigma) P_(mu lambda) P_(nu sigma)
+  [alpha (mu nu | lambda sigma)^((X_A)) + beta (mu nu | lambda sigma)_omega^((X_A))] $ <eq:cam-grad>
+
+交換相関項 @eq:xc-grad は $f$ が変わるだけで形は同じ。
+
 = 解析的エネルギー勾配 <sec:grad>
 
 == 全体の式

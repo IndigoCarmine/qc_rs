@@ -177,6 +177,10 @@ def main():
     sp.append(single_point("nh3", "6-31g", "b3lypg"))
     sp.append(single_point("ch4", "6-31g", "b3lypg"))
     sp.append(single_point("h2co", "6-31g", "b3lypg"))
+    # --- Range-separated hybrid ---
+    for geom, basis in [("h2o", "6-31g"), ("h2o_dist", "6-31g"), ("h2o", "6-31g*"), ("nh3", "6-31g"),
+                        ("ch4", "6-31g"), ("h2co", "6-31g")]:
+        sp.append(single_point(geom, basis, "camb3lyp"))
     # What does the plain name "b3lyp" mean in this PySCF version?
     sp.append(single_point("h2o", "6-31g", "b3lyp", grad=False))
 
@@ -185,6 +189,7 @@ def main():
         optimize("nh3", "6-31g*", "rhf"),
         optimize("h2o_dist", "6-31g", "b3lypg"),
         optimize("nh3", "6-31g", "b3lypg"),
+        optimize("h2o_dist", "6-31g", "camb3lyp"),
     ]
 
     out = {

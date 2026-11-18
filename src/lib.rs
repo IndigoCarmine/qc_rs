@@ -48,6 +48,7 @@ pub use error::{QcError, Result};
 pub use functional::{Functional, XcComponent};
 pub use gradient::{GradientComponents, rhf_gradient, rks_gradient};
 pub use grid::{GridSettings, MolecularGrid};
+pub use integrals::ExchangeKernel;
 pub use optimize::{OptimizationResult, OptimizationStep, OptimizerSettings, bfgs_minimize};
 pub use linalg::Matrix;
 pub use molecule::{Atom, Molecule, Unit};

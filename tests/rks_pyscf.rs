@@ -97,7 +97,8 @@ fn rks_single_points_match_pyscf() {
         let de1 = report.check(&case, "scf_summary.e1", (c.one_electron - summary["e1"].as_f64().unwrap()).abs(), 1e-5);
         let dcoul =
             report.check(&case, "scf_summary.coul", (c.coulomb - summary["coul"].as_f64().unwrap()).abs(), 1e-5);
-        // PySCF's "exc" is E_xc plus the exact-exchange energy -(a_HF/4) Tr(PK).
+        // PySCF's "exc" is E_xc plus the exact-exchange energy -(a_HF/4) Tr(PK), for
+        // CAM-B3LYP -(1/4) Tr(P K^x) with the kernel [α + β erf(ωr)]/r (eq:cam-fock).
         let dexc =
             report.check(&case, "scf_summary.exc", (c.xc + c.exchange - summary["exc"].as_f64().unwrap()).abs(), 1e-5);
         let mu = dipole_moment(&mol, &basis, &scf.density);
@@ -121,7 +122,7 @@ fn rks_single_points_match_pyscf() {
             elapsed.as_secs_f64()
         );
     }
-    assert_eq!(n_cases, 13, "expected 13 RKS reference entries");
+    assert_eq!(n_cases, 19, "expected 19 RKS reference entries (13 + 6 CAM-B3LYP)");
     println!("max deviations over all RKS cases:");
     for (what, m) in &report.maxima {
         println!("  {what:18} {m:.3e}");

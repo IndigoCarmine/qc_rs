@@ -95,7 +95,7 @@ pub struct GeometryOptimization {
 
 impl Calculation {
     /// `method` is "hf" or a functional name accepted by [`Functional::from_name`]
-    /// (e.g. "b3lyp", "blyp", "svwn5"); `basis` is a built-in basis set name
+    /// (e.g. "b3lyp", "blyp", "svwn5", "cam-b3lyp"); `basis` is a built-in basis set name
     /// ("sto-3g", "6-31g", "6-31g*", "6-31g**"). Spherical d functions, the default DFT
     /// grid of theory.typ section 8.4 and default SCF options.
     pub fn new(molecule: &Molecule, method: &str, basis: &str) -> Result<Self> {

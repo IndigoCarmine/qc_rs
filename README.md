@@ -18,7 +18,7 @@ Windows・Linux・macOS のどれでも `cargo build` だけでビルドでき�
     小さい分子では最も速い方法です。
   - **直接法**（`IntegralStrategy::Direct`）：積分を保存せず、反復ごとに殻四つ組を計算して J・K に直接足し込みます。
     密度で重みづけた Schwarz 選別と、密度の差分 ΔP による Fock 行列の構築で計算を減らします。メモリは N² 程度です。
-  - 既定は**自動**（`IntegralStrategy::Auto`）：保存するテンソルが `ScfOptions::eri_memory_budget`（既定 2 GiB、N ≈ 215 に相当）
+  - 既定は**自動**（`IntegralStrategy::Auto`）：保存するテンソルが `ScfOptions::eri_memory_budget`（既定 0.5 GiB、N ≈ 150 に相当）
     に収まれば保存法、超えれば直接法を使います。どちらを使ったかは `ScfResult::integral_strategy` に入ります。
     直接法の選別の閾値は `ScfOptions::direct_threshold`（既定 1e-12。エネルギーの誤差はその 10 倍程度）です。
     計測例は下の「保存法と直接法の速さとメモリ」にあります。

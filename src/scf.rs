@@ -77,8 +77,10 @@ pub enum IntegralStrategy {
     Auto,
 }
 
-/// Default for [`ScfOptions::eri_memory_budget`]: 2 GiB.
-pub const DEFAULT_ERI_MEMORY_BUDGET: u64 = 2 << 30;
+/// Default for [`ScfOptions::eri_memory_budget`]: 0.5 GiB (about 150 basis functions).
+/// Above roughly that size the direct build is faster than the stored tensor as
+/// well as smaller: N = 168 took 5.4 s direct against 10.0 s stored (24 threads).
+pub const DEFAULT_ERI_MEMORY_BUDGET: u64 = 1 << 29;
 
 /// SCF settings (defaults from theory.typ section 6.3).
 #[derive(Debug, Clone)]

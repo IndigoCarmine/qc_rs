@@ -1,7 +1,7 @@
 # qc_rs
 
 Gauss 基底による閉殻 Hartree–Fock（RHF）と Kohn–Sham DFT（RKS）の Rust 実装です。
-1点エネルギー・解析的エネルギー勾配・構造最適化ができます。依存クレートは `rayon`（並列化）だけです。
+1点エネルギー・解析的エネルギー勾配・構造最適化ができ、分散補正 DFT-D3（BJ・ゼロ減衰）を加えられます。依存クレートは `rayon`（並列化）だけです。
 数式はすべて `docs/theory.typ`（理論仕様書）に従い、コード中のコメントは仕様書の式ラベル（`eq:grad` など）を参照しています。
 
 純 Rust で書かれており、C/Fortran のライブラリやシステムの BLAS を必要としません。
@@ -30,11 +30,18 @@ Windows・Linux・macOS のどれでも `cargo build` だけでビルドでき�
 - DFT の格子は Becke 分割＋Gauss–Chebyshev 動径格子＋**直積型の角度格子**（Gauss–Legendre × 等間隔 φ、Lebedev ではない）で、刈り込みはしません。
   勾配では格子重みの核座標微分を無視します。その誤差（合力が 0 からずれる大きさ）は細かい格子で 1e-9〜2e-6（最大は H2CO）、既定の格子で 1e-6 程度です。
 - 構造最適化は**デカルト座標の BFGS**（信頼半径つき）です。内部座標・対称性・遷移状態探索はありません。
+- 分散補正は **DFT-D3 の2体項**だけで、減衰は **BJ**（D3(BJ)）と**ゼロ減衰**（D3(0)）です（`Calculation::with_dispersion`）。
+  エネルギー・解析的勾配・構造最適化のすべてに入ります。既定では入りません。
+  - 公表パラメータがあるのは B3LYP（B3LYP5 も同じ値）と CAM-B3LYP。他の手法（HF を含む）では `with_dispersion` はエラーで、
+    パラメータを `D3Parameters::new` で自分で与えれば `with_dispersion_parameters` で使えます。
+  - 3体項（Axilrod–Teller–Muto）はなく、距離の打ち切りもしません（全原子対を足す）。D2・D4 もありません。元素は H–Ar。
+  - 参照値は dftd3 1.7.0（同じ条件：3体項なし・打ち切りなし）。一致度は下の「PySCF との比較」にあります。
+  - B3LYP の D3 パラメータが VWN-RPA 版と VWN5 版のどちらに当てはめられたものかは未確認です（`docs/theory.typ` の分散補正の節）。
 
 ## 使い方
 
 ```rust
-use qc_rs::{Calculation, Molecule, OptimizerSettings, Unit};
+use qc_rs::{Calculation, D3Variant, Molecule, OptimizerSettings, Unit};
 
 fn main() -> qc_rs::Result<()> {
     // 座標は Unit::Angstrom または Unit::Bohr
@@ -51,6 +58,11 @@ fn main() -> qc_rs::Result<()> {
     let opt = calc.optimize(&OptimizerSettings::default())?;
     println!("E = {e:.10}, dE/dx(O) = {:.6}", g[0][0]);
     println!("E_opt = {:.10} ({} steps)", opt.energy, opt.steps);
+
+    // 分散補正 B3LYP-D3(BJ)：energy・gradient・optimize のすべてに E_disp とその勾配が入る
+    let d3 = Calculation::new(&mol, "b3lyp", "6-31g*")?.with_dispersion(D3Variant::Bj)?;
+    let sp = d3.energy()?;
+    println!("E = {:.10} (E_disp = {:?})", sp.energy, sp.dispersion_energy);
     Ok(())
 }
 ```
@@ -63,6 +75,9 @@ XYZ ファイルは `Molecule::from_xyz(&text)` で読めます。勾配と最�
 最適化が収束しなければエラー（`QcError::OptimizationNotConverged`）になります。
 低水準の関数（`run_rhf`、`run_rks`、`gradient::rhf_gradient`、`gradient::rks_gradient`、`bfgs_minimize` など）も公開しています。
 勾配の各項（1電子・2電子・重なり/W・交換相関・核間反発）は `GradientComponents` で個別に得られます。
+分散補正を入れたときは、`SinglePoint::energy` と `GradientResult::energy`・`gradient` が SCF 部分と分散部分の和で、
+分散部分は `dispersion_energy`・`dispersion_gradient` に別に入ります（`components` は SCF 部分だけ）。
+分散補正だけを計算する関数 `dispersion::dispersion_energy`、`dispersion::dispersion_energy_and_gradient` もあります。
 
 水分子の例（RHF/6-31G\*、B3LYP/6-31G、CAM-B3LYP/6-31G の1点計算・勾配・構造最適化）：
 
@@ -137,6 +152,10 @@ python -m venv .venv
 .venv/Scripts/python tests/reference/gen_d3_reference.py
 ```
 
+D3 の一致度（`tests/dispersion_d3.rs`、B3LYP・CAM-B3LYP の BJ・ゼロ減衰、H–Ar の全元素とテスト分子）：エネルギーの相対差は
+BJ で 3.8e-8 以下、ゼロ減衰で 6.9e-7 以下、勾配の差は BJ で 2.2e-11、ゼロ減衰で 6.4e-10 Eh/Bohr 以下です
+（差は取り込んだ数表が単精度の値であることによる）。解析的勾配と中心差分の差は 6e-12 Eh/Bohr 以下です。
+
 ### テスト用分子の追加
 
 `tests/molecules/` に XYZ ファイル（座標は Å）を置くと、テスト `tests/molecules_pyscf.rs` が自動で拾い、
@@ -183,6 +202,8 @@ qc_rs 自体が実行時に使うのは Rust の標準ライブラリと rayon �
 | [Libxc](https://libxc.gitlab.io/) | PySCF が内部で使う汎関数ライブラリ。`b3lypg`、`vwn_rpa` などの名前はこのライブラリの定義に対応します（qc_rs からは使いません） |
 | [geomeTRIC](https://github.com/leeping/geomeTRIC) | PySCF 側の構造最適化（参照となる最適化構造とエネルギー） |
 | [Basis Set Exchange](https://www.basissetexchange.org/) | 基底関数データ（`data/basis/*.gbs`）の入手元 |
+| [tad-dftd3](https://github.com/dftd3/tad-dftd3) / [tad-mctc](https://github.com/tad-mctc/tad-mctc) | DFT-D3 の数表（`data/dispersion/d3_h_ar.dat`、Apache-2.0）の入手元 |
+| [simple-dftd3](https://github.com/dftd3/simple-dftd3)（PyPI の `dftd3` 1.7.0） | D3 の参照値（エネルギー・勾配）の生成。ブラックボックスとして実行するだけで、コードは読んでいません |
 | [Typst](https://typst.app/) | 理論仕様書 `docs/theory.typ` の組版 |
 | [Rust](https://www.rust-lang.org/) / [rayon](https://github.com/rayon-rs/rayon) | 実装言語と、2電子積分・数値積分の並列化 |
 | [serde_json](https://github.com/serde-rs/json) | テストで参照値の JSON を読む（開発時のみの依存） |
@@ -230,6 +251,16 @@ Helgaker, Jørgensen & Olsen *Molecular Electronic-Structure Theory*（Wiley, 20
 - B. G. Johnson, P. M. W. Gill, J. A. Pople, *J. Chem. Phys.* **98**, 5612 (1993) — DFT のエネルギーと勾配を数値積分で実装する方法（交換相関項の勾配、格子重みの微分の扱い）。
 - C. G. Broyden, R. Fletcher, D. Goldfarb, D. F. Shanno（いずれも 1970）— 準 Newton 法の BFGS 更新式。教科書としては J. Nocedal, S. J. Wright, *Numerical Optimization*（Springer）。
 
+**分散補正 DFT-D3**（`src/dispersion.rs`、`data/dispersion/`）
+
+- S. Grimme, J. Antony, S. Ehrlich, H. Krieg, *J. Chem. Phys.* **132**, 154104 (2010) — DFT-D3。配位数、C6 の参照値とその補間、C8、ゼロ減衰と原子対の R0。
+- S. Grimme, S. Ehrlich, L. Goerigk, *J. Comput. Chem.* **32**, 1456 (2011) — D3 への Becke–Johnson 減衰の適用（D3(BJ)）とそのパラメータ。
+- E. R. Johnson, A. D. Becke, *J. Chem. Phys.* **123**, 024101 (2005) — 有理（Becke–Johnson）減衰の元の形。
+- P. Pyykkö, M. Atsumi, *Chem. Eur. J.* **15**, 186 (2009) — 配位数に使う共有結合半径。
+- M. Friede, C. Hölzer, S. Ehlert, S. Grimme, *J. Chem. Phys.* **161**, 062501 (2024) — tad-dftd3 / tad-mctc。取り込んだ D3 の数表（H–Ar）の入手元です。
+- 汎関数ごとの減衰パラメータは Grimme 研究室の DFT-D3 公開ページとプログラム説明書（Ver. 3.2 Rev 0, 2016）によります。
+- エネルギー勾配の式（連鎖律）は `docs/theory.typ` で導いたもので、文献の式ではありません。
+
 **基底関数**（`data/basis/`）
 
 - W. J. Hehre, R. F. Stewart, J. A. Pople, *J. Chem. Phys.* **51**, 2657 (1969) — STO-3G。
@@ -258,5 +289,11 @@ Pritchard ほか (2019) を引用してください。データ自体の再配�
 
 BSD 3-Clause（`LICENSE` を参照）。
 
-基底関数のデータ（`data/basis/`）だけは qc_rs の著作物ではなく、Basis Set Exchange に帰属します。
-出典・ライセンス・引用すべき文献は [data/basis/README.md](data/basis/README.md) にあります。
+次の2つのデータは qc_rs の著作物ではありません（どちらもコンパイル時にライブラリに埋め込まれます）。
+
+- 基底関数のデータ（`data/basis/`）は Basis Set Exchange に帰属します。
+  出典・ライセンス・引用すべき文献は [data/basis/README.md](data/basis/README.md) にあります。
+- 分散補正 DFT-D3 の数表（`data/dispersion/`）は tad-dftd3 0.7.0 と tad-mctc 0.8.0 から取り出したもので、
+  両プロジェクトの作者に帰属し、Apache License 2.0 で配布されています（[data/dispersion/LICENSE-APACHE-2.0.txt](data/dispersion/LICENSE-APACHE-2.0.txt)）。
+  値は Grimme ら（2010）にさかのぼります。出典・qc_rs が加えた変更・引用すべき文献は [data/dispersion/README.md](data/dispersion/README.md) にあります。
+  ライブラリを組み込んだプログラムを配布するときは、この帰属表示と Apache License 2.0 の本文を同梱してください。

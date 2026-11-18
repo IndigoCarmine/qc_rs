@@ -47,6 +47,7 @@ pub use basis::{Basis, BasisOptions, BasisSetDefinition};
 pub use calculation::{Calculation, GeometryOptimization, GradientResult, SinglePoint};
 pub use dft::{RksResult, XcIntegrator, run_rks};
 pub use direct::{DirectBuildStatistics, DirectJk};
+pub use dispersion::{D3Damping, D3Parameters, D3Variant};
 pub use error::{QcError, Result};
 pub use functional::{Functional, XcComponent};
 pub use gradient::{GradientComponents, rhf_gradient, rks_gradient};

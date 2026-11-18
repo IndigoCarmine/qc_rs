@@ -1,11 +1,12 @@
 //! DFT-D3 building blocks (theory.typ section sec:d3): the reference data, the
 //! coordination number with its nuclear derivatives (eq:d3-cn) and the Gaussian UNCHECKED(Grimme2010) UNCHECKED(Pyykko2009)
 //! interpolation of C6 with its derivatives with respect to the coordination
-//! numbers (eq:d3-c6). The damping functions, the energy and the gradient are UNCHECKED(Grimme2010)
-//! assembled elsewhere.
+//! numbers (eq:d3-c6), the damping parameters of D3(BJ) and D3(0) and the UNCHECKED(Grimme2010)
+//! two-body dispersion energy (eq:d3-e, eq:d3-c8, eq:d3-bj, eq:d3-zero). The UNCHECKED(Grimme2010) UNCHECKED(Grimme2011) UNCHECKED(Johnson2005)
+//! gradient is not implemented here yet.
 
 use crate::error::{QcError, Result};
-use crate::molecule::{Atom, element_symbol};
+use crate::molecule::{Atom, Molecule, element_symbol};
 use std::sync::OnceLock;
 
 // DFT-D3 reference data for H–Ar (covalent radii, r4r2, reference coordination
@@ -310,6 +311,126 @@ impl D3Data {
     }
 }
 
+/// Damping function of the D3 two-body term and its parameters.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub enum D3Damping {
+    /// Becke–Johnson (rational) damping, theory.typ eq:d3-bj. `a2` is in Bohr.
+    Bj { s6: f64, a1: f64, s8: f64, a2: f64 },
+    /// Zero damping, theory.typ eq:d3-zero, with α8 = α6 + 2 (sec:d3).
+    Zero { s6: f64, sr6: f64, s8: f64, sr8: f64, alpha6: f64 },
+}
+
+/// Which damping to take from the published parameter tables.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum D3Variant {
+    /// D3(BJ).
+    Bj,
+    /// D3(0).
+    Zero,
+}
+
+/// Parameters of a DFT-D3 correction. Only the two-body term is implemented.
+/// Construct with [`D3Parameters::for_functional`] or [`D3Parameters::new`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub struct D3Parameters {
+    /// The damping and its parameters.
+    pub damping: D3Damping,
+}
+
+impl D3Parameters {
+    /// Parameters given explicitly. Every parameter must be finite. They set the
+    /// damping radius and steepness, so `sr6`, `sr8` and `alpha6` must be positive,
+    /// and `a1`, `a2` non-negative and not both zero (the BJ radius a1 R0 + a2 must
+    /// be positive).
+    pub fn new(damping: D3Damping) -> Result<Self> {
+        let (all, ok): (&[f64], bool) = match &damping {
+            D3Damping::Bj { s6, a1, s8, a2 } => (&[*s6, *a1, *s8, *a2], *a1 >= 0.0 && *a2 >= 0.0 && *a1 + *a2 > 0.0),
+            D3Damping::Zero { s6, sr6, s8, sr8, alpha6 } => {
+                (&[*s6, *sr6, *s8, *sr8, *alpha6], *sr6 > 0.0 && *sr8 > 0.0 && *alpha6 > 0.0)
+            }
+        };
+        if all.iter().any(|v| !v.is_finite()) || !ok {
+            return Err(QcError::InvalidInput(format!("invalid D3 damping parameters {damping:?}")));
+        }
+        Ok(D3Parameters { damping })
+    }
+
+    /// The published parameters of a functional (table in theory.typ sec:d3).
+    /// Names are matched like [`crate::Functional::from_name`] (case and white
+    /// space ignored): "b3lyp", "b3lypg", "b3lyp5" and "cam-b3lyp" ("camb3lyp",
+    /// "cam_b3lyp"). B3LYP with VWN-RPA and with VWN5 get the same values: which of
+    /// the two the parameters were fitted to is unconfirmed (theory.typ sec:d3).
+    /// Other functionals are an error.
+    pub fn for_functional(name: &str, variant: D3Variant) -> Result<Self> {
+        let key: String = name.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_ascii_lowercase();
+        let damping = match (key.as_str(), variant) {
+            ("b3lyp" | "b3lypg" | "b3lyp5", D3Variant::Bj) => D3Damping::Bj { s6: 1.0, a1: 0.3981, s8: 1.9889, a2: 4.4211 },
+            ("b3lyp" | "b3lypg" | "b3lyp5", D3Variant::Zero) => {
+                D3Damping::Zero { s6: 1.0, sr6: 1.261, s8: 1.703, sr8: 1.0, alpha6: 14.0 }
+            }
+            ("cam-b3lyp" | "camb3lyp" | "cam_b3lyp", D3Variant::Bj) => {
+                D3Damping::Bj { s6: 1.0, a1: 0.3708, s8: 2.0674, a2: 5.4743 }
+            }
+            ("cam-b3lyp" | "camb3lyp" | "cam_b3lyp", D3Variant::Zero) => {
+                D3Damping::Zero { s6: 1.0, sr6: 1.378, s8: 1.217, sr8: 1.0, alpha6: 14.0 }
+            }
+            _ => {
+                return Err(QcError::InvalidInput(format!(
+                    "no DFT-D3 {variant:?} parameters for functional '{name}' (available: b3lyp, b3lyp5, cam-b3lyp)"
+                )));
+            }
+        };
+        Self::new(damping)
+    }
+}
+
+/// Two-body energy e_AB of one atom pair at distance `r` (theory.typ eq:d3-e),
+/// with C8 from eq:d3-c8 and the damping of eq:d3-bj or eq:d3-zero. `r0_zero` is
+/// the tabulated R0^AB, used by zero damping only.
+fn pair_energy(damping: &D3Damping, c6: f64, r4r2_a: f64, r4r2_b: f64, r0_zero: f64, r: f64) -> f64 {
+    // eq:d3-c8: C8 = 3 C6 sqrt(Q_A Q_B), with r4r2 = sqrt(Q).
+    let q = 3.0 * r4r2_a * r4r2_b;
+    let c8 = c6 * q;
+    let (r2, r6) = (r * r, r.powi(6));
+    let r8 = r6 * r2;
+    match *damping {
+        D3Damping::Bj { s6, a1, s8, a2 } => {
+            // eq:d3-bj: R0 = sqrt(C8 / C6) = sqrt(q), independent of the CN.
+            let rd = a1 * q.sqrt() + a2;
+            let rd6 = rd.powi(6);
+            -(s6 * c6 / (r6 + rd6) + s8 * c8 / (r8 + rd6 * rd * rd))
+        }
+        D3Damping::Zero { s6, sr6, s8, sr8, alpha6 } => {
+            // eq:d3-zero: f_n = 1 / (1 + 6 (r / (s_r,n R0))^(-α_n)), α8 = α6 + 2.
+            let f6 = 1.0 / (1.0 + 6.0 * (r / (sr6 * r0_zero)).powf(-alpha6));
+            let f8 = 1.0 / (1.0 + 6.0 * (r / (sr8 * r0_zero)).powf(-(alpha6 + 2.0)));
+            -(s6 * c6 / r6 * f6 + s8 * c8 / r8 * f8)
+        }
+    }
+}
+
+/// DFT-D3 dispersion energy in Hartree (theory.typ eq:d3-e), summed over all atom
+/// pairs without a distance cutoff. Elements beyond Ar are an error.
+pub fn dispersion_energy(mol: &Molecule, params: &D3Parameters) -> Result<f64> {
+    let data = d3_data()?;
+    let atoms = mol.atoms();
+    let cn = data.coordination_numbers(atoms)?.cn;
+    let mut energy = 0.0;
+    for a in 0..atoms.len() {
+        let (za, ra) = (atoms[a].z, data.r4r2(atoms[a].z)?);
+        for b in 0..a {
+            let zb = atoms[b].z;
+            let d: [f64; 3] = std::array::from_fn(|k| atoms[a].position[k] - atoms[b].position[k]);
+            let r = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+            let c6 = data.c6(za, zb, cn[a], cn[b])?.c6;
+            energy += pair_energy(&params.damping, c6, ra, data.r4r2(zb)?, data.r0ab(za, zb)?, r);
+        }
+    }
+    Ok(energy)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -464,6 +585,63 @@ mod tests {
             assert!((num_a - v.dc6_dcn_a).abs() < tol, "{za}-{zb} dA: {num_a} vs {}", v.dc6_dcn_a);
             assert!((num_b - v.dc6_dcn_b).abs() < tol, "{za}-{zb} dB: {num_b} vs {}", v.dc6_dcn_b);
         }
+    }
+
+    #[test]
+    fn dimer_energy_by_hand() {
+        // He2 and Ar2: one reference each, so C6 is the table value at any CN.
+        for (z, r) in [(2u32, 5.7), (18, 7.1)] {
+            let mol = Molecule::new(atoms(&[z, z], &[[0.0; 3], [0.0, 0.0, r]]), 0).unwrap();
+            let d = data();
+            let c6 = d.reference_c6(z, z, 0, 0).unwrap();
+            let q = d.r4r2(z).unwrap();
+            let c8 = 3.0 * c6 * q * q; // eq:d3-c8
+            let r0 = d.r0ab(z, z).unwrap();
+
+            let (s6, a1, s8, a2) = (1.0, 0.3981, 1.9889, 4.4211);
+            let rd = a1 * (c8 / c6).sqrt() + a2; // eq:d3-bj
+            let e_bj = -(s6 * c6 / (r.powi(6) + rd.powi(6)) + s8 * c8 / (r.powi(8) + rd.powi(8)));
+            let bj = D3Parameters::new(D3Damping::Bj { s6, a1, s8, a2 }).unwrap();
+            let e = dispersion_energy(&mol, &bj).unwrap();
+            assert!((e - e_bj).abs() <= 1e-14 * e_bj.abs(), "Z={z} BJ: {e} vs {e_bj}");
+
+            let (s6, sr6, s8) = (1.0, 1.261, 1.703);
+            let f6 = 1.0 / (1.0 + 6.0 * (r / (sr6 * r0)).powf(-14.0)); // eq:d3-zero
+            let f8 = 1.0 / (1.0 + 6.0 * (r / r0).powf(-16.0));
+            let e_zero = -(s6 * c6 / r.powi(6) * f6 + s8 * c8 / r.powi(8) * f8);
+            let zero = D3Parameters::for_functional("b3lyp", D3Variant::Zero).unwrap();
+            let e = dispersion_energy(&mol, &zero).unwrap();
+            assert!((e - e_zero).abs() <= 1e-14 * e_zero.abs(), "Z={z} zero: {e} vs {e_zero}");
+        }
+    }
+
+    #[test]
+    fn energy_of_single_atom_is_zero_and_translation_invariant() {
+        let p = D3Parameters::for_functional("cam-b3lyp", D3Variant::Bj).unwrap();
+        let one = Molecule::new(atoms(&[6], &[[0.3, 0.2, 0.1]]), 0).unwrap();
+        assert_eq!(dispersion_energy(&one, &p).unwrap(), 0.0);
+        let pos = [[0.0, 0.0, 0.0], [1.8, 0.1, 0.0], [-0.5, 1.7, 0.2], [0.3, -0.4, 2.9]];
+        let shifted: Vec<[f64; 3]> = pos.iter().map(|p| [p[0] + 3.0, p[1] - 1.0, p[2] + 0.5]).collect();
+        let a = dispersion_energy(&Molecule::new(atoms(&[8, 1, 1, 6], &pos), 0).unwrap(), &p).unwrap();
+        let b = dispersion_energy(&Molecule::new(atoms(&[8, 1, 1, 6], &shifted), 0).unwrap(), &p).unwrap();
+        assert!(a < 0.0 && (a - b).abs() <= 1e-15 * a.abs(), "{a} vs {b}");
+    }
+
+    #[test]
+    fn invalid_parameters_are_rejected() {
+        let bad = [
+            D3Damping::Bj { s6: 1.0, a1: 0.4, s8: f64::NAN, a2: 4.4 },
+            D3Damping::Bj { s6: 1.0, a1: 0.0, s8: 1.9, a2: 0.0 },
+            D3Damping::Bj { s6: 1.0, a1: -0.1, s8: 1.9, a2: 4.4 },
+            D3Damping::Bj { s6: 1.0, a1: 0.4, s8: 1.9, a2: -1.0 },
+            D3Damping::Zero { s6: 1.0, sr6: 0.0, s8: 1.7, sr8: 1.0, alpha6: 14.0 },
+            D3Damping::Zero { s6: 1.0, sr6: 1.2, s8: 1.7, sr8: 1.0, alpha6: f64::INFINITY },
+        ];
+        for d in bad {
+            assert!(matches!(D3Parameters::new(d), Err(QcError::InvalidInput(_))), "{d:?}");
+        }
+        assert!(D3Parameters::new(D3Damping::Bj { s6: 1.0, a1: 0.4, s8: 0.0, a2: 4.4 }).is_ok());
+        assert!(D3Parameters::new(D3Damping::Bj { s6: 1.0, a1: 0.0, s8: 1.9, a2: 4.4 }).is_ok());
     }
 
     #[test]

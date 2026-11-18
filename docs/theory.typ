@@ -114,6 +114,9 @@ $ E_0^(00) &= exp(-mu X_(A B)^2) \
   E_t^(i+1, j) &= 1/(2p) E_(t-1)^(i j) + X_(P A) E_t^(i j) + (t+1) E_(t+1)^(i j) \
   E_t^(i, j+1) &= 1/(2p) E_(t-1)^(i j) + X_(P B) E_t^(i j) + (t+1) E_(t+1)^(i j) $ <eq:E-rec>
 
+ここでの $Lambda_t$ は Gauss 因子 $e^(-p x_P^2)$ を含む。McMurchie と Davidson（1978）の $Lambda_t$ は多項式部分だけで、
+係数 $d_t^(i j)$ は因子 $exp(-mu X_(A B)^2)$ を含まないので、$E_t^(i j) = exp(-mu X_(A B)^2) d_t^(i j)$ である（漸化式は同じ）。
+
 $x, y, z$ それぞれについて独立に求め、$E_t^(l_1 l_2)$（$x$）、$E_u^(m_1 m_2)$（$y$）、$E_v^(n_1 n_2)$（$z$）と書く。
 以下 $E_(t u v)^(a b) = E_t^(l_1 l_2) E_u^(m_1 m_2) E_v^(n_1 n_2)$。
 
@@ -137,6 +140,7 @@ $hat(T) = -1/2 nabla^2$。1次元の2階微分の行列要素は
 $ D_(i j)^2 = bra(i) dif^2 / (dif x^2) ket(j) = j(j-1) S_(i, j-2) - 2b(2j+1) S_(i j) + 4b^2 S_(i, j+2) $ <eq:kin-1d>
 
 （$j < 2$ のとき第1項は 0）。
+McMurchie と Davidson（1978）は運動エネルギーを $nabla phi dot nabla phi$ の形（その式 (2.37)）で書いているが、部分積分で上の2階微分の形と等しい。
 
 $ bra(g_a) hat(T) ket(g_b) = -1/2 [D_(l_1 l_2)^2 S_(m_1 m_2) S_(n_1 n_2) + S_(l_1 l_2) D_(m_1 m_2)^2 S_(n_1 n_2)
   + S_(l_1 l_2) S_(m_1 m_2) D_(n_1 n_2)^2] $ <eq:kin>
@@ -404,6 +408,10 @@ $ hat(x) = (x, x_rho, x_sigma), quad
 
 $ f_x^"S" = -3/4 (3 / pi)^(1 slash 3) rho^(4 slash 3) $ <eq:slater>
 
+係数は Dirac（1930）の一様電子気体の交換エネルギーのもので、Kohn と Sham（1965）の交換ポテンシャル
+$mu_x = -(3 rho slash pi)^(1 slash 3)$（その式 (2.19)）は $partial f_x^"S" slash partial rho$ に一致する。
+Slater（1951）の平均交換ポテンシャル $-3 (3 rho slash 8 pi)^(1 slash 3)$ はこの $3 slash 2$ 倍で、ここで使う係数の出典ではない（「Slater 交換」は慣用名）。
+
 == Becke 88 交換
 
 スピンごとの密度 $rho_s = rho slash 2$、勾配 $abs(nabla rho_s) = sqrt(sigma) slash 2$ を用いて
@@ -420,7 +428,9 @@ $ epsilon_c^"VWN" = A {ln(x^2 / X(x)) + (2b) / Q arctan(Q / (2x + b))
 
 $ f_c^"VWN" = rho thin epsilon_c^"VWN" $
 
-常磁性（閉殻）のパラメータ：
+常磁性（閉殻）のパラメータ。$A$ は Hartree 単位で、論文の値 $A^P = 0.0621814$ Ry の半分である。
+VWN5 は Ceperley–Alder の値への当てはめ、VWN-RPA は RPA の値への当てはめで、
+どちらの名前も論文のものではなく後の慣用である：
 
 #align(center, table(
   columns: 5, stroke: 0.4pt, inset: 5pt, align: center,
@@ -456,6 +466,16 @@ $ a = 0.04918, quad b = 0.132, quad c = 0.2533, quad d = 0.349 $
 ))
 
 B3LYP は Gaussian と同じ VWN-RPA 版（Stephens ら 1994）、B3LYP5 は VWN5 版である。
+
+元の Becke（1993）の3パラメータ混成は（その式 (2)、(3)）
+
+$ E_"xc" = E_"xc"^"LSDA" + a_0 (E_x^"exact" - E_x^"LSDA") + a_x Delta E_x^"B88" + a_c Delta E_c^"PW91", quad
+  a_0 = 0.20, quad a_x = 0.72, quad a_c = 0.81 $
+
+で、$Delta E_x^"B88"$ は B88 の勾配補正だけである。交換は $0.80 f_x^"S" + 0.72 Delta f_x^"B88"$ と厳密交換 $0.20$ で、
+$f_x^"B88" = f_x^"S" + Delta f_x^"B88"$ を使うと $0.80 - 0.72 = 0.08$ から上の表の $0.08 f_x^"S" + 0.72 f_x^"B88"$ になる。
+元の論文の相関は Perdew–Wang の局所相関に PW91 の勾配補正の $0.81$ 倍を加えたもので、LYP と VWN は出てこない。
+相関を $(1 - a_c) f_c^"VWN" + a_c f_c^"LYP"$ に置き換えたのは Stephens ら（1994、未照合）である。
 実装は「$f$ の線形結合（係数と成分の列）＋ $a_"HF"$」という一般形にしておく。
 
 = 距離分離混成汎関数（CAM-B3LYP） <sec:cam>
@@ -501,10 +521,23 @@ $ alpha' = (alpha_"PQ" omega^2) / (alpha_"PQ" + omega^2), quad
 8重対称性 @eq:eri-sym と Schwarz の不等式 @eq:schwarz は減衰した積分にもそのまま成り立つ
 （$erf(omega r) slash r$ は正定値の核である）。中心微分 @eq:center-deriv も同じ規則で求まる。
 
-== 短距離 B88 交換
+Adamson, Dombroski, Gill（1999）が式 (11)–(13) で与えているのは短距離の $"erfc"(omega r) slash r$ の積分で、
+上の式はその式 (1)（$erf = 1 slash r - "erfc"$）により、式 (11) の引かれる第2項として導いたものである。
+次の3点はこの論文にはなく、ここで確かめたことである：
+
+- 積分表示：$erf(omega r) slash r$ を $omega$ で微分すると $(2 slash sqrt(pi)) e^(-omega^2 r^2)$ で、$erf(0) = 0$ なので上の積分表示が成り立つ（初等的）。
+- 正定値性：$erf(omega r) slash r$ の Fourier 変換は $(4 pi slash k^2) exp(-k^2 slash (4 omega^2)) > 0$ なので核は正定値で、正定値の核についての Schwarz の不等式（Häser と Ahlrichs 1989）が使える。
+- 中心微分：核は $vb(r)_1 - vb(r)_2$ だけの関数で、中心は Hermite 展開係数と $vb(P) - vb(Q)$ を通してしか入らないので、@eq:center-deriv がそのまま使える。
+
+== CAM で減衰した B88 交換
 
 交換汎関数を $E_x = -1/2 sum_s integral rho_s^(4 slash 3) K_s dif vb(r)$ と書いたときの $K_s$ を使い、
-Iikura ら（2001）の方法で @eq:cam-split の第1項に対応する交換エネルギーを作る。B88 では
+Iikura ら（2001、式 (8)）の短距離 GGA 交換を、@eq:cam-split の第1項に一般化する。
+$alpha = 0$、$beta = 1$ のとき Iikura ら・Tawada ら（2004）の長距離補正の交換に一致する。
+$a_s, b_s, c_s$ を使う @eq:cam-att の形は Tawada ら（式 (4)–(7)）と Yanai ら（式 (2)–(5)）のもので、Iikura らの式 (8) と代数的に同じである。
+一般の $alpha, beta$ での因子 $1 - alpha - beta A$ はどの論文にも印刷されておらず、構成が演算子について線形であること
+（$1 - alpha - beta erf = (1 - alpha - beta) dot 1 + beta op("erfc")$）から従う。
+$K_s$ の B88 での具体形は Becke（1988）による。B88 では
 
 $ K_s = 2 [3/2 (3 / (4 pi))^(1 slash 3) + beta_"B88" x_s^2 / (1 + 6 beta_"B88" x_s asinh(x_s))], quad
   x_s = abs(nabla rho_s) / rho_s^(4 slash 3), quad beta_"B88" = 0.0042 $ <eq:cam-K>
@@ -538,6 +571,9 @@ $erf$ は Boys 関数から求める： $erf(z) = (2z slash sqrt(pi)) F_0 (z^2)$
 
 $ f^"CAM-B3LYP" = f_x^"CAM-B88" + 0.81 f_c^"LYP" + 0.19 f_c^"VWN5", quad
   alpha = 0.19, quad beta = 0.46, quad omega = 0.33 thin a_0^(-1) $ <eq:cam-b3lyp>
+
+論文（Yanai ら 2004）の記号では $omega$ は $mu$ である。論文は $mu$ の単位を書いておらず、ここでは原子単位と解釈している。
+交換は B88 全体（Slater と B88 補正に分けた B3LYP 型の混合ではない）である。
 
 （相関の局所部分は VWN5。）実装の一般形は「$f$ の線形結合 ＋ 厳密交換の核 $(alpha, beta, omega)$」とし、
 これまでの $a_"HF"$ は $alpha = a_"HF"$、$beta = 0$ に当たる。

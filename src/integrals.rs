@@ -2,8 +2,8 @@
 //! two-electron repulsion integrals (theory.typ sections 4–5).
 //!
 //! Primitive integrals come from [`crate::hermite`]; this module applies the
-//! contraction coefficients d̃_k, the Cartesian factors c_lmn (eq:contracted) and
-//! the spherical d transformation (eq:sph-d).
+//! contraction coefficients d̃_k, the Cartesian factors c_lmn (eq:contracted) and UNCHECKED(Helgaker2000)
+//! the spherical d transformation (eq:sph-d). UNCHECKED(Schlegel1995)
 
 use crate::basis::{Basis, Shell, cartesian_components, cartesian_norm, transform_axis};
 use crate::hermite::{HermiteR, PrimitivePair, erf_attenuation};
@@ -64,7 +64,7 @@ where
     m
 }
 
-/// Overlap matrix S. theory.typ eq:ovlp
+/// Overlap matrix S. theory.typ eq:ovlp VERIFIED(McMurchie1978, derived from Eq. (3.4) with (2.27), p. 10 (preprint))
 pub fn overlap(basis: &Basis) -> Matrix {
     one_electron(basis, |pair, ca, cb, c, block| {
         for (x, &la) in ca.iter().enumerate() {
@@ -75,7 +75,7 @@ pub fn overlap(basis: &Basis) -> Matrix {
     })
 }
 
-/// Kinetic-energy matrix T. theory.typ eq:kin
+/// Kinetic-energy matrix T. theory.typ eq:kin VERIFIED(McMurchie1978, derived from Eqs. (2.35)-(2.37), p. 8 and p. 11 text (preprint); factor 1/2 not printed)
 pub fn kinetic(basis: &Basis) -> Matrix {
     one_electron(basis, |pair, ca, cb, c, block| {
         for (x, &la) in ca.iter().enumerate() {
@@ -86,7 +86,7 @@ pub fn kinetic(basis: &Basis) -> Matrix {
     })
 }
 
-/// Nuclear-attraction matrix V (including -Z_C). theory.typ eq:nuc
+/// Nuclear-attraction matrix V (including -Z_C). theory.typ eq:nuc UNCHECKED(Szabo1996)
 pub fn nuclear_attraction(basis: &Basis, mol: &Molecule) -> Matrix {
     point_charge_attraction(basis, &mol.atoms().iter().map(|a| (a.z as f64, a.position)).collect::<Vec<_>>())
 }
@@ -117,7 +117,7 @@ pub fn core_hamiltonian(basis: &Basis, mol: &Molecule) -> Matrix {
     &kinetic(basis) + &nuclear_attraction(basis, mol)
 }
 
-/// Dipole integrals ⟨χ_μ|r - origin|χ_ν⟩ for x, y, z. theory.typ eq:dip-1d
+/// Dipole integrals ⟨χ_μ|r - origin|χ_ν⟩ for x, y, z. theory.typ eq:dip-1d VERIFIED(McMurchie1978, derived from Eqs. (3.5)-(3.6), pp. 10-11 (preprint))
 pub fn dipole(basis: &Basis, origin: [f64; 3]) -> [Matrix; 3] {
     [0, 1, 2].map(|k| {
         one_electron(basis, |pair, ca, cb, c, block| {
@@ -205,7 +205,7 @@ struct EriScratch {
 }
 
 /// Contracted Cartesian shell quartet (ab|cd), row-major `[comp_ab][comp_cd]`, of the
-/// operator 1/r (`omega = None`, theory.typ eq:eri) or erf(ωr)/r (eq:eri-erf).
+/// operator 1/r (`omega = None`, theory.typ eq:eri) or erf(ωr)/r (eq:eri-erf). VERIFIED(McMurchie1978, derived from Eqs. (3.30)-(3.34), p. 14 (preprint), with (2.27)) VERIFIED(Adamson1999, derived from Eqs. (1), (11)-(13), p. 922; the paper prints the erfc integral)
 fn shell_quartet_cart(ab: &ShellPairData, cd: &ShellPairData, omega: Option<f64>, s: &mut EriScratch) -> Vec<f64> {
     let ltot = ab.lab + cd.lab;
     let (nab, ncd) = (ab.ncomp, cd.ncomp);
@@ -279,7 +279,7 @@ fn shell_quartet(
 
 /// Schwarz factors Q_ab = sqrt(max |(μν|μν)|) over the normalized *Cartesian*
 /// components μ ∈ a, ν ∈ b of every shell pair a >= b, indexed by `pair_index(a, b)`
-/// over shells. theory.typ eq:schwarz
+/// over shells. theory.typ eq:schwarz UNCHECKED(Haser1989)
 pub fn cartesian_schwarz_factors(basis: &Basis) -> Vec<f64> {
     let shells = basis.shells();
     let mut pairs = Vec::new();
@@ -305,7 +305,7 @@ pub fn cartesian_schwarz_factors(basis: &Basis) -> Vec<f64> {
 }
 
 /// Kernel [α + β erf(ωr)]/r of the exact (Hartree–Fock-type) exchange
-/// (theory.typ eq:cam-split, eq:cam-k). An ordinary hybrid with a fraction a_HF of
+/// (theory.typ eq:cam-split, eq:cam-k). An ordinary hybrid with a fraction a_HF of VERIFIED(Yanai2004, Eq. (7), p. 52)
 /// exact exchange is α = a_HF, β = 0 (see [`ExchangeKernel::global`]); for β = 0, ω is
 /// irrelevant.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -344,7 +344,7 @@ impl From<f64> for ExchangeKernel {
 }
 
 /// Two-electron integrals (μν|λσ) stored once per 8-fold permutation class.
-/// theory.typ eq:eri-sym
+/// theory.typ eq:eri-sym UNCHECKED(Szabo1996)
 #[derive(Debug, Clone)]
 pub struct EriTensor {
     nao: usize,
@@ -359,8 +359,11 @@ impl EriTensor {
     }
 
     /// Attenuated integrals (μν|λσ)_ω of erf(ωr)/r (theory.typ eq:cam-k, eq:eri-erf).
-    /// erf(ωr)/r is a positive-definite kernel, so the Schwarz screening, done with
-    /// the attenuated diagonal integrals themselves, remains a rigorous bound.
+    /// erf(ωr)/r is a positive-definite kernel (its Fourier transform
+    /// (4π/k²) exp(−k²/(4ω²)) is positive; not from Adamson1999), so the Schwarz
+    /// inequality for a positive-definite kernel (Häser–Ahlrichs 1989) holds and the
+    /// screening, done with the attenuated diagonal integrals themselves, remains a
+    /// rigorous bound.
     pub fn compute_erf(basis: &Basis, omega: f64, schwarz_threshold: f64) -> Self {
         Self::compute_operator(basis, Some(omega), schwarz_threshold)
     }
@@ -466,7 +469,7 @@ impl EriTensor {
     }
 
     /// Coulomb matrix J and, if requested, exchange matrix K for a symmetric
-    /// density P. theory.typ eq:jk
+    /// density P. theory.typ eq:jk UNCHECKED(Roothaan1951)
     pub fn coulomb_exchange(&self, p: &Matrix, want_k: bool) -> (Matrix, Option<Matrix>) {
         self.contract(p, true, want_k)
     }

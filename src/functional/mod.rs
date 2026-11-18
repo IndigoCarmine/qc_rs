@@ -2,11 +2,11 @@
 //!
 //! Every component is written once as an energy density f(ρ, σ) per volume in
 //! terms of [`Dual`] numbers; v_ρ = ∂f/∂ρ and v_σ = ∂f/∂σ come out of the
-//! forward-mode differentiation (theory.typ eq:dual).
+//! forward-mode differentiation (theory.typ eq:dual). UNCHECKED(Griewank2008)
 //!
 //! One file per component, each headed by its literature reference:
 //! `slater.rs`, `b88.rs`, `vwn.rs` (VWN5 and VWN-RPA share one formula), `lyp.rs`
-//! and `cam_b88.rs` (short-range B88 of CAM-B3LYP). This file holds the mixtures
+//! and `cam_b88.rs` (Coulomb-attenuated B88 of CAM-B3LYP). This file holds the mixtures
 //! (BLYP, B3LYP, CAM-B3LYP, …).
 
 mod b88;
@@ -27,19 +27,19 @@ use vwn::{VWN_RPA, VWN5, vwn};
 /// A single exchange or correlation energy density.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum XcComponent {
-    /// Slater (Dirac) LDA exchange. theory.typ eq:slater
+    /// Slater (Dirac) LDA exchange. theory.typ eq:slater UNCHECKED(Dirac1930) VERIFIED(Becke1988, Eqs. (1a), (1b), p. 3098; closed shell by rho_s = rho/2) VERIFIED(Kohn1965, derived from Eqs. (2.7), (2.19), pp. A1134-A1135)
     SlaterExchange,
-    /// Becke 88 GGA exchange (includes the Slater part). theory.typ eq:b88
+    /// Becke 88 GGA exchange (includes the Slater part). theory.typ eq:b88 VERIFIED(Becke1988, Eqs. (1), (4), (8), pp. 3098-3099; closed shell by rho_s = rho/2)
     B88Exchange,
-    /// VWN correlation, parametrization 5 (VWN5). theory.typ eq:vwn
+    /// VWN correlation, parametrization 5 (VWN5). theory.typ eq:vwn VERIFIED(Vosko1980, Eq. [4.4]; parameters Table 5 caption and p. 1207)
     Vwn5Correlation,
-    /// VWN correlation, RPA parametrization (VWN-RPA, "VWN3" in Gaussian). theory.typ eq:vwn
+    /// VWN correlation, the paper's RPA fit (VWN-RPA). theory.typ eq:vwn VERIFIED(Vosko1980, Eq. [4.4]; parameters Table 5 caption and p. 1207)
     VwnRpaCorrelation,
-    /// Lee–Yang–Parr GGA correlation, closed-shell form. theory.typ eq:lyp
+    /// Lee–Yang–Parr GGA correlation, closed-shell form. theory.typ eq:lyp VERIFIED(Lee1988, derived from Eq. (21) with t_W of Eq. (8) by integration by parts; parameters p. 785) UNCHECKED(Miehlich1989)
     LypCorrelation,
     /// B88 exchange for the part [1 − α − β erf(ωr)]/r of the Coulomb operator
     /// (Coulomb-attenuating method; the rest is exact exchange with the same α, β, ω).
-    /// theory.typ eq:cam-b88
+    /// theory.typ eq:cam-b88 VERIFIED(Yanai2004, derived from Eqs. (2)-(5), p. 51, and Eq. (7), p. 52)
     CamB88Exchange {
         /// Short-range fraction α of exact exchange.
         alpha: f64,
@@ -81,7 +81,7 @@ pub struct XcValues {
 }
 
 /// f = Σ_k c_k f_k plus exact exchange with the kernel [α + β erf(ωr)]/r
-/// (theory.typ section 9.5 and eq:cam-b3lyp; an ordinary hybrid has α = a_HF, β = 0).
+/// (theory.typ section 9.5 and eq:cam-b3lyp; an ordinary hybrid has α = a_HF, β = 0). VERIFIED(Yanai2004, Eq. (9), p. 55; p. 53 and Table 1)
 #[derive(Debug, Clone, PartialEq)]
 pub struct Functional {
     name: String,
@@ -97,7 +97,7 @@ impl Functional {
     }
 
     /// General functional with an exact-exchange kernel [α + β erf(ωr)]/r
-    /// (theory.typ eq:cam-k). The density-functional exchange in `terms` must cover the
+    /// (theory.typ eq:cam-k). The density-functional exchange in `terms` must cover the VERIFIED(Yanai2004, derived from Eqs. (6), (7), p. 52)
     /// complementary part of the operator (e.g. [`XcComponent::CamB88Exchange`] with the
     /// same α, β, ω).
     pub fn with_exchange_kernel(name: &str, terms: Vec<(f64, XcComponent)>, kernel: ExchangeKernel) -> Self {
@@ -134,15 +134,25 @@ impl Functional {
         Self::new("BLYP", vec![(1.0, XcComponent::B88Exchange), (1.0, XcComponent::LypCorrelation)], 0.0)
     }
 
-    /// B3LYP with VWN-RPA (Gaussian's definition; PySCF "b3lypg").
+    /// B3LYP with VWN-RPA (Gaussian's definition; PySCF "b3lypg"). Exchange mixing and
+    /// a0, ax, ac: VERIFIED(Becke1993, Eqs. (2), (3), pp. 5649-5650; exchange mixing and a0, ax, ac).
+    /// LYP/VWN correlation and the VWN-RPA choice: UNCHECKED(Stephens1994)
     ///
     /// References:
-    /// - A. D. Becke, J. Chem. Phys. 98, 5648 (1993): the three-parameter hybrid
-    ///   (exact exchange mixed with Slater, B88 and a gradient-corrected
-    ///   correlation; originally with PW91 correlation), parameters 0.20, 0.72, 0.81.
+    /// - A. D. Becke, J. Chem. Phys. 98, 5648 (1993): the three-parameter hybrid,
+    ///   Eq. (2), p. 5649: E_xc = E_xc^LSDA + a0 (E_x^exact − E_x^LSDA) +
+    ///   ax ΔE_x^B88 + ac ΔE_c^PW91, with a0 = 0.20, ax = 0.72, ac = 0.81 (Eq. (3), p. 5650; a
+    ///   least-squares fit to 116 G1 data: 56 atomization energies, 42 ionization
+    ///   potentials, 8 proton affinities, 10 first-row total atomic energies).
+    ///   Its exchange is 0.80 Slater + 0.72 ΔB88 (the B88 gradient correction) +
+    ///   0.20 exact; with the full B88 = Slater + ΔB88 used here this is
+    ///   0.08 Slater + 0.72 B88 + 0.20 exact (checked by derivation). Its correlation
+    ///   is the Perdew–Wang 1992 LSDA correlation plus 0.81 times the PW91 gradient
+    ///   correction; LYP and VWN do not appear in the paper.
     /// - P. J. Stephens, F. J. Devlin, C. F. Chabalowski, M. J. Frisch,
-    ///   J. Phys. Chem. 98, 11623 (1994): the same three parameters with LYP + VWN
-    ///   correlation, i.e. "B3LYP" as implemented in Gaussian (VWN-RPA).
+    ///   J. Phys. Chem. 98, 11623 (1994): the same three parameters with the
+    ///   correlation (1 − ac) VWN + ac LYP, i.e. "B3LYP" as implemented in Gaussian
+    ///   (VWN-RPA). Not collected, not checked.
     pub fn b3lyp() -> Self {
         Self::new("B3LYP", Self::b3lyp_terms(XcComponent::VwnRpaCorrelation), 0.20)
     }
@@ -155,9 +165,11 @@ impl Functional {
         Self::new("B3LYP5", Self::b3lyp_terms(XcComponent::Vwn5Correlation), 0.20)
     }
 
-    /// CAM-B3LYP (theory.typ eq:cam-b3lyp): short-range B88 exchange (eq:cam-b88) +
+    /// CAM-B3LYP (theory.typ eq:cam-b3lyp): Coulomb-attenuated B88 exchange (eq:cam-b88) +
     /// 0.81 LYP + 0.19 VWN5, exact exchange with α = 0.19, β = 0.46, ω = 0.33 Bohr⁻¹
     /// (PySCF "camb3lyp"). References in `cam_b88.rs`, `lyp.rs` and `vwn.rs`.
+    /// Parameters and mixture: VERIFIED(Yanai2004, Eq. (9), p. 55; p. 53 and Table 1).
+    /// The paper writes μ for ω and states no unit; atomic units are assumed.
     pub fn cam_b3lyp() -> Self {
         let kernel = ExchangeKernel { alpha: 0.19, beta: 0.46, omega: 0.33 };
         let x = XcComponent::CamB88Exchange { alpha: kernel.alpha, beta: kernel.beta, omega: kernel.omega };
@@ -169,6 +181,8 @@ impl Functional {
     }
 
     fn b3lyp_terms(vwn: XcComponent) -> Vec<(f64, XcComponent)> {
+        // Becke 1993 Eq. (2): 0.80 Slater + 0.72 ΔB88 = 0.08 Slater + 0.72 B88, since
+        // B88 here includes the Slater part. Correlation (1 − ac) VWN + ac LYP: Stephens 1994.
         vec![
             (0.08, XcComponent::SlaterExchange),
             (0.72, XcComponent::B88Exchange),

@@ -1,5 +1,5 @@
 //! Forward-mode dual numbers carrying a value and its partial derivatives with
-//! respect to ρ and σ (theory.typ eq:dual).
+//! respect to ρ and σ (theory.typ eq:dual). UNCHECKED(Griewank2008)
 //!
 //! `Dual::rho(ρ)` = (ρ, 1, 0) and `Dual::sigma(σ)` = (σ, 0, 1); evaluating an
 //! energy density written with these operations yields (f, ∂f/∂ρ, ∂f/∂σ).
@@ -115,7 +115,7 @@ impl Dual {
     }
 }
 
-/// erf x = (2x/√π) F₀(x²) (Boys function, theory.typ eq:boys).
+/// erf x = (2x/√π) F₀(x²) (Boys function, theory.typ eq:boys). UNCHECKED(Helgaker2000)
 pub fn erf(x: f64) -> f64 {
     let mut f = [0.0];
     boys(0, x * x, &mut f);

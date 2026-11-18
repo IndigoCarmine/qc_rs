@@ -168,12 +168,14 @@ Helgaker, Jørgensen & Olsen *Molecular Electronic-Structure Theory*（Wiley, 20
 **密度汎関数法**（`src/dft.rs`、`src/functional/`）
 
 - P. Hohenberg, W. Kohn, *Phys. Rev.* **136**, B864 (1964); W. Kohn, L. J. Sham, *Phys. Rev.* **140**, A1133 (1965) — 密度汎関数理論と Kohn–Sham 方程式。
-- P. A. M. Dirac, *Math. Proc. Cambridge Philos. Soc.* **26**, 376 (1930); J. C. Slater, *Phys. Rev.* **81**, 385 (1951) — 一様電子ガスの交換エネルギー（Slater 交換）。
+- P. A. M. Dirac, *Math. Proc. Cambridge Philos. Soc.* **26**, 376 (1930) — 一様電子ガスの交換エネルギー（いわゆる Slater 交換の係数）。
+- J. C. Slater, *Phys. Rev.* **81**, 385 (1951) — Hartree–Fock の交換を占有状態で平均した局所交換ポテンシャルで置き換える方法。そのポテンシャルはここで使うものの 3/2 倍です。
+  ここで使う交換ポテンシャル（エネルギー密度の ρ 微分）は Kohn–Sham 1965 の式 (2.19) のものです。
 - S. H. Vosko, L. Wilk, M. Nusair, *Can. J. Phys.* **58**, 1200 (1980) — 一様電子ガスの相関エネルギーの当てはめ式（VWN5 と VWN-RPA）。
 - A. D. Becke, *Phys. Rev. A* **38**, 3098 (1988) — 勾配補正つき交換汎関数 B88。
 - C. Lee, W. Yang, R. G. Parr, *Phys. Rev. B* **37**, 785 (1988) — 相関汎関数 LYP。
-- B. Miehlich, A. Savin, H. Stoll, H. Preuss, *Chem. Phys. Lett.* **157**, 200 (1989) — LYP から密度のラプラシアンを消した形。実装はこの閉殻形です。
-- A. D. Becke, *J. Chem. Phys.* **98**, 5648 (1993) — 厳密交換を混ぜる3パラメータ混成汎関数。
+- B. Miehlich, A. Savin, H. Stoll, H. Preuss, *Chem. Phys. Lett.* **157**, 200 (1989) — LYP から密度のラプラシアンを消した形と、その ω, δ による書き方。実装の書き方はこの論文に従いますが、閉殻形そのものは Lee–Yang–Parr 1988 の式 (21) から部分積分で従います。
+- A. D. Becke, *J. Chem. Phys.* **98**, 5648 (1993) — 厳密交換を混ぜる3パラメータ混成汎関数。元の論文の相関は Perdew–Wang の局所相関に PW91 の勾配補正を加えたものです。
 - P. J. Stephens, F. J. Devlin, C. F. Chabalowski, M. J. Frisch, *J. Phys. Chem.* **98**, 11623 (1994) — その相関を LYP + VWN にした B3LYP。
 - H. Iikura, T. Tsuneda, T. Yanai, K. Hirao, *J. Chem. Phys.* **115**, 3540 (2001) — GGA 交換の長距離補正。誤差関数で分けた短距離部分の交換エネルギーを、汎関数の K_s と減衰因子で書く方法（短距離 B88 の式）。
 - T. Yanai, D. P. Tew, N. C. Handy, *Chem. Phys. Lett.* **393**, 51 (2004) — CAM-B3LYP。Coulomb 演算子を α + β erf(ωr) で分ける形と、そのパラメータ（α = 0.19、β = 0.46、ω = 0.33）。
@@ -203,12 +205,15 @@ Helgaker, Jørgensen & Olsen *Molecular Electronic-Structure Theory*（Wiley, 20
 - S. Lehtola ほか, *SoftwareX* **7**, 1 (2018) — Libxc。
 - L.-P. Wang, C. Song, *J. Chem. Phys.* **144**, 214108 (2016) — geomeTRIC。
 
-書誌情報は記憶に基づいて書いたもので、巻・ページは原典と照合していません。引用する際は原典で確認してください。
+DOI つきの一覧と、各論文と実装を照合した結果は [docs/papers/README.md](docs/papers/README.md) にあります。
 
 ## 基底関数データ
 
 `data/basis/` の Gaussian94 形式ファイルは [Basis Set Exchange](https://www.basissetexchange.org/) から取得したもので、
-コンパイル時にライブラリに埋め込まれます。
+コンパイル時にライブラリに埋め込まれます。指数と係数は原論文で公表された数値です（上の「基底関数」の文献）。
+Basis Set Exchange のソフトウェアとそこに収められたデータは BSD 3-Clause で配布されています
+（Copyright (c) 2020 The Molecular Sciences Software Institute, Virginia Tech）。利用するときは
+Pritchard ほか (2019) を引用してください。データ自体の再配布条件は Basis Set Exchange のサイトには明記されていません。
 
 ## ライセンス
 

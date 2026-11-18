@@ -1,15 +1,34 @@
 //! Primitive-level McMurchie–Davidson machinery (theory.typ sections 3–5).
 //!
 //! Everything here works on *unnormalized* primitive Cartesian Gaussians
-//! g_lmn(r; a, A) = x_A^l y_A^m z_A^n exp(-a r_A^2) (theory.typ eq:prim) with
+//! g_lmn(r; a, A) = x_A^l y_A^m z_A^n exp(-a r_A^2) (theory.typ eq:prim) with UNCHECKED(Helgaker2000)
 //! arbitrary angular momentum, so that derivative integrals (which need L+1,
-//! theory.typ eq:center-deriv) can be built from the same routines.
+//! theory.typ eq:center-deriv) can be built from the same routines. UNCHECKED(Pulay1969)
 //! Contraction and normalization live in `integrals.rs`.
+//!
+//! Reference:
+//! - L. E. McMurchie, E. R. Davidson, J. Comput. Phys. 26, 218 (1978): Hermite
+//!   expansion of Gaussian products and the Hermite Coulomb integrals R_tuv. The
+//!   collected file `docs/papers/mcmurchie1978.pdf` is the typewritten preprint
+//!   (UCRL-13791, pages numbered -1- to -20-), not the journal article; all equation
+//!   and page numbers in the tags here are the preprint's, and the journal numbering
+//!   has not been confirmed.
+//!
+//! Checked against the paper (preprint), all by derivation: the spec uses the modern
+//! form E_t^{ij} = exp(−μ X_AB²) d_t^{ij}, its Λ_t including the Gaussian, whereas the
+//! paper's Λ_t (Eq. (2.15)) is the polynomial alone and its coefficients d exclude
+//! exp(−μ X_AB²); the recurrences are the same. Checked numerically with mpmath up to
+//! f functions: the 1-D identities to 1e-22, nuclear attraction and ERIs against
+//! independent quadrature to 1e-15.
+//! Suspected misprints in the preprint (they do not affect the code): in Eq. (2.41),
+//! p. 9, the term −2n̄α_A d^{n,n̄−1} e^{ℓ+1,ℓ̄} should have the sign +; Eq. (4.3),
+//! p. 16, lacks the factor (−2α)^(N+L+M−n−ℓ−m).
 
 use crate::boys::boys;
 use std::f64::consts::PI;
 
-/// Hermite expansion coefficients E_t^{ij} for one Cartesian direction. theory.typ eq:E-rec
+/// Hermite expansion coefficients E_t^{ij} for one Cartesian direction. theory.typ eq:E-rec VERIFIED(McMurchie1978, derived from Eqs. (2.20)-(2.22), p. 7 (preprint); E = exp(-mu X_AB^2) d, same recurrence)
+/// The expansion they define: theory.typ eq:hermite-exp VERIFIED(McMurchie1978, derived from Eqs. (2.15)-(2.17), (2.25), pp. 6-7 (preprint))
 #[derive(Debug, Clone)]
 pub struct HermiteE {
     jmax: usize,
@@ -22,7 +41,7 @@ impl HermiteE {
     pub fn new(imax: usize, jmax: usize, a: f64, b: f64, xab: f64) -> Self {
         let p = a + b;
         let mu = a * b / p;
-        // theory.typ eq:gpt
+        // theory.typ eq:gpt VERIFIED(McMurchie1978, derived from Eqs. (2.8)-(2.10), (2.14), pp. 5-6 (preprint))
         let xpa = -b / p * xab;
         let xpb = a / p * xab;
         let half_inv_p = 0.5 / p;
@@ -61,7 +80,7 @@ impl HermiteE {
     }
 }
 
-/// Hermite Coulomb integrals R_tuv(p, R) for t+u+v <= lmax. theory.typ eq:R-rec
+/// Hermite Coulomb integrals R_tuv(p, R) for t+u+v <= lmax. theory.typ eq:R-rec VERIFIED(McMurchie1978, derived from Eqs. (4.4)-(4.8), pp. 16-17 (preprint))
 #[derive(Debug, Clone, Default)]
 pub struct HermiteR {
     lmax: usize,
@@ -167,7 +186,7 @@ impl PrimitivePair {
     pub fn new(a: f64, ra: [f64; 3], la_max: usize, b: f64, rb: [f64; 3], lb_max: usize) -> Self {
         let p = a + b;
         let center = [0, 1, 2].map(|k| (a * ra[k] + b * rb[k]) / p);
-        // lb_max + 2 so that the kinetic-energy integral (eq:kin-1d) is available.
+        // lb_max + 2 so that the kinetic-energy integral (eq:kin-1d) is available. VERIFIED(McMurchie1978, derived from Eqs. (2.30), (2.37), p. 8 (preprint); second-derivative form by integration by parts)
         let e = [0, 1, 2].map(|k| HermiteE::new(la_max, lb_max + 2, a, b, ra[k] - rb[k]));
         PrimitivePair { a, b, p, center, la_max, lb_max, e }
     }
@@ -188,7 +207,7 @@ impl PrimitivePair {
         debug_assert!(la.iter().all(|&l| l <= self.la_max) && lb.iter().all(|&l| l <= self.lb_max));
     }
 
-    /// 1D overlap S_ij. theory.typ eq:ovlp-1d
+    /// 1D overlap S_ij. theory.typ eq:ovlp-1d VERIFIED(McMurchie1978, derived from Eq. (3.3) with (2.17), p. 10 (preprint))
     #[inline]
     fn s1(&self, k: usize, i: usize, j: usize) -> f64 {
         self.e(k, i, j, 0) * (PI / self.p).sqrt()
@@ -204,13 +223,13 @@ impl PrimitivePair {
         v
     }
 
-    /// Overlap ⟨g_a|g_b⟩. theory.typ eq:ovlp
+    /// Overlap ⟨g_a|g_b⟩. theory.typ eq:ovlp VERIFIED(McMurchie1978, derived from Eq. (3.4) with (2.27), p. 10 (preprint))
     pub fn overlap(&self, la: [usize; 3], lb: [usize; 3]) -> f64 {
         self.check(la, lb);
         self.s1(0, la[0], lb[0]) * self.s1(1, la[1], lb[1]) * self.s1(2, la[2], lb[2])
     }
 
-    /// Kinetic energy ⟨g_a|-∇²/2|g_b⟩. theory.typ eq:kin
+    /// Kinetic energy ⟨g_a|-∇²/2|g_b⟩. theory.typ eq:kin VERIFIED(McMurchie1978, derived from Eqs. (2.35)-(2.37), p. 8 and p. 11 text (preprint); factor 1/2 not printed)
     pub fn kinetic(&self, la: [usize; 3], lb: [usize; 3]) -> f64 {
         self.check(la, lb);
         let s = [0, 1, 2].map(|k| self.s1(k, la[k], lb[k]));
@@ -218,7 +237,7 @@ impl PrimitivePair {
         -0.5 * (d[0] * s[1] * s[2] + s[0] * d[1] * s[2] + s[0] * s[1] * d[2])
     }
 
-    /// First moments ⟨g_a|r - C|g_b⟩ for the three directions. theory.typ eq:dip-1d
+    /// First moments ⟨g_a|r - C|g_b⟩ for the three directions. theory.typ eq:dip-1d VERIFIED(McMurchie1978, derived from Eqs. (3.5)-(3.6), pp. 10-11 (preprint))
     pub fn dipole(&self, la: [usize; 3], lb: [usize; 3], origin: [f64; 3]) -> [f64; 3] {
         self.check(la, lb);
         let s = [0, 1, 2].map(|k| self.s1(k, la[k], lb[k]));
@@ -230,7 +249,7 @@ impl PrimitivePair {
     }
 
     /// Nuclear-attraction-type integral ⟨g_a|1/|r - C||g_b⟩ given R_tuv(p, P - C)
-    /// computed up to at least la+lb. theory.typ eq:nuc-prim
+    /// computed up to at least la+lb. theory.typ eq:nuc-prim VERIFIED(McMurchie1978, derived from Eqs. (3.13)-(3.14), (2.27), pp. 7, 12 (preprint))
     pub fn nuclear(&self, la: [usize; 3], lb: [usize; 3], r: &HermiteR) -> f64 {
         self.check(la, lb);
         let mut sum = 0.0;
@@ -308,7 +327,7 @@ pub struct Primitive {
 
 /// Exponent α' and prefactor factor √(ω²/(α + ω²)) that turn the Coulomb integral
 /// with Gaussian-product exponent α = pq/(p+q) into the erf(ωr)/r integral.
-/// theory.typ eq:eri-erf. ω = ∞ gives (α, 1), i.e. the Coulomb integral.
+/// theory.typ eq:eri-erf. ω = ∞ gives (α, 1), i.e. the Coulomb integral. VERIFIED(Adamson1999, derived from Eqs. (1), (11)-(13), p. 922; the paper prints the erfc integral)
 #[inline]
 pub fn erf_attenuation(alpha: f64, omega: f64) -> (f64, f64) {
     if omega.is_infinite() {
@@ -319,7 +338,7 @@ pub fn erf_attenuation(alpha: f64, omega: f64) -> (f64, f64) {
     (alpha * w2 / d, (w2 / d).sqrt())
 }
 
-/// Two-electron integral (g_a g_b | g_c g_d) of unnormalized primitives. theory.typ eq:eri
+/// Two-electron integral (g_a g_b | g_c g_d) of unnormalized primitives. theory.typ eq:eri VERIFIED(McMurchie1978, derived from Eqs. (3.30)-(3.34), p. 14 (preprint), with (2.27))
 pub fn eri_primitive(ga: &Primitive, gb: &Primitive, gc: &Primitive, gd: &Primitive) -> f64 {
     eri_primitive_kernel(ga, gb, gc, gd, None)
 }

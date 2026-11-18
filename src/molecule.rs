@@ -2,7 +2,7 @@
 
 use crate::error::{QcError, Result};
 
-/// Bohr radius in Angstrom (CODATA 2018). theory.typ eq:bohr
+/// Bohr radius in Angstrom (CODATA 2018). theory.typ eq:bohr UNCHECKED(CODATA2018)
 pub const BOHR_IN_ANGSTROM: f64 = 0.529177210903;
 
 const ELEMENTS: [&str; 18] = [
@@ -178,7 +178,7 @@ impl Molecule {
         Molecule::new(atoms, self.charge)
     }
 
-    /// Nuclear repulsion energy. theory.typ eq:vnn
+    /// Nuclear repulsion energy. theory.typ eq:vnn UNCHECKED(Szabo1996)
     pub fn nuclear_repulsion(&self) -> f64 {
         let mut e = 0.0;
         for (i, a) in self.atoms.iter().enumerate() {

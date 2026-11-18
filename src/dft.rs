@@ -1,5 +1,5 @@
 //! Closed-shell Kohn–Sham DFT: numerical XC energy and potential on the molecular
-//! grid (theory.typ section 8: eq:rho, eq:exc, eq:vxc) and the RKS driver.
+//! grid (theory.typ section 8: eq:rho, eq:exc, eq:vxc) and the RKS driver. UNCHECKED(Johnson1993) VERIFIED(Kohn1965, Eq. (2.3), p. A1133; continuous LDA integral only, quadrature not in paper)
 //!
 //! Grid points are processed per [`GridBlock`] (one radial shell of one atom) in
 //! parallel. For every block only the shells that can be non-negligible on it are

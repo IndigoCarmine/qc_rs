@@ -18,8 +18,8 @@ pub struct XcTerm {
 }
 
 /// A model for the exchange-correlation part of the Fock matrix
-/// F = h + J - ½ K^x + V^xc (theory.typ eq:fock-rks, eq:cam-fock), where K^x is the
-/// exchange matrix of the kernel [α + β erf(ωr)]/r (eq:cam-k); K^x = a_HF K for an
+/// F = h + J - ½ K^x + V^xc (theory.typ eq:fock-rks, eq:cam-fock), where K^x is the UNCHECKED(Johnson1993) VERIFIED(Yanai2004, derived from Eqs. (6), (7), p. 52) VERIFIED(Kohn1965, derived from Eqs. (2.6)-(2.9), p. A1134; a_HF = 0)
+/// exchange matrix of the kernel [α + β erf(ωr)]/r (eq:cam-k); K^x = a_HF K for an VERIFIED(Yanai2004, derived from Eqs. (6), (7), p. 52)
 /// ordinary hybrid.
 pub trait ExchangeCorrelation {
     /// Fraction a_HF of exact (Hartree–Fock) exchange (the short-range fraction α for a
@@ -52,7 +52,7 @@ impl ExchangeCorrelation for HartreeFock {
 /// How the starting density is chosen when none is supplied.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InitialGuess {
-    /// Superposition of spherically averaged atomic densities (theory.typ eq:sad).
+    /// Superposition of spherically averaged atomic densities (theory.typ eq:sad). UNCHECKED(VanLenthe2006)
     #[default]
     AtomicDensities,
     /// Orbitals of the core Hamiltonian. Cheap, but a poor start for larger molecules:
@@ -67,7 +67,7 @@ pub struct ScfOptions {
     pub max_iterations: usize,
     /// Convergence threshold on |ΔE| (Hartree).
     pub energy_tolerance: f64,
-    /// Convergence threshold on max |e| of the DIIS error (eq:diis-err).
+    /// Convergence threshold on max |e| of the DIIS error (eq:diis-err). UNCHECKED(Pulay1982)
     pub error_tolerance: f64,
     /// Number of Fock/error pairs kept for DIIS.
     pub diis_size: usize,
@@ -97,7 +97,7 @@ impl Default for ScfOptions {
     }
 }
 
-/// Energy decomposition (Hartree). theory.typ eq:e-rks
+/// Energy decomposition (Hartree). theory.typ eq:e-rks UNCHECKED(Johnson1993) VERIFIED(Kohn1965, derived from Eqs. (2.1)-(2.3), (2.10), pp. A1133-A1134; a_HF = 0)
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct EnergyComponents {
     /// Σ P h.
@@ -135,7 +135,7 @@ pub struct ScfResult {
     pub orbital_energies: Vec<f64>,
     /// MO coefficients (AOs × MOs, columns ordered like `orbital_energies`).
     pub coefficients: Matrix,
-    /// Density matrix P = 2 C_occ C_occᵀ built from `coefficients` (eq:density).
+    /// Density matrix P = 2 C_occ C_occᵀ built from `coefficients` (eq:density). UNCHECKED(Roothaan1951)
     pub density: Matrix,
     /// Number of doubly occupied orbitals.
     pub n_occupied: usize,
@@ -198,7 +198,7 @@ impl ScfSystem<'_> {
         Ok((f, comps))
     }
 
-    /// Solves F C = S C ε via X (theory.typ eq:roothaan, eq:orth).
+    /// Solves F C = S C ε via X (theory.typ eq:roothaan, eq:orth). UNCHECKED(Roothaan1951) UNCHECKED(Szabo1996)
     fn diagonalize(&self, f: &Matrix) -> Result<(Vec<f64>, Matrix)> {
         let fp = self.x.transpose().matmul(f).matmul(&self.x);
         let e = symmetric_eigen(&fp)?;
@@ -220,7 +220,7 @@ fn density(c: &Matrix, nocc: usize) -> Matrix {
     p
 }
 
-/// Occupation numbers of a spherically averaged atom (theory.typ eq:sad-occ): orbitals
+/// Occupation numbers of a spherically averaged atom (theory.typ eq:sad-occ): orbitals UNCHECKED(VanLenthe2006)
 /// are filled in order of energy, and a set of degenerate orbitals shares its electrons
 /// equally.
 fn atomic_occupations(energies: &[f64], n_electrons: usize) -> Vec<f64> {
@@ -428,7 +428,7 @@ fn finish(sys: &mut ScfSystem, f: &Matrix, nocc: usize, iterations: usize, de: f
     })
 }
 
-/// Pulay DIIS: solve theory.typ eq:diis, dropping the oldest pair while singular.
+/// Pulay DIIS: solve theory.typ eq:diis, dropping the oldest pair while singular. UNCHECKED(Pulay1980)
 fn diis_extrapolate(diis: &mut VecDeque<(Matrix, Matrix)>) -> Result<Matrix> {
     loop {
         let m = diis.len();

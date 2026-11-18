@@ -1,27 +1,27 @@
 //! Analytic nuclear gradients dE/dR of closed-shell RHF and RKS energies
-//! (theory.typ section 10, eq:grad).
+//! (theory.typ section 10, eq:grad). UNCHECKED(Pulay1969)
 //!
 //! The gradient is assembled term by term as in theory.typ eq:grad:
 //!
-//! * one-electron: Σ P h^(X) — kinetic energy (eq:dS form) and nuclear attraction,
+//! * one-electron: Σ P h^(X) — kinetic energy (eq:dS form) and nuclear attraction, UNCHECKED(Pulay1969)
 //!   including the operator ("Hellmann–Feynman") part via translational invariance
-//!   (eq:hf-force);
-//! * two-electron: Σ Γ (μν|λσ)^(X) with Γ of eq:gamma; for a range-separated exchange
-//!   kernel also the attenuated integrals of eq:cam-grad;
-//! * overlap: -Σ W S^(X) with the energy-weighted density W of eq:W;
-//! * exchange–correlation: eq:xc-grad (grid-weight derivatives neglected);
-//! * nuclear repulsion: eq:vnn-grad.
+//!   (eq:hf-force); UNCHECKED(Pulay1969)
+//! * two-electron: Σ Γ (μν|λσ)^(X) with Γ of eq:gamma; for a range-separated exchange UNCHECKED(Pulay1969)
+//!   kernel also the attenuated integrals of eq:cam-grad; DERIVED (from eq:cam-fock; Yanai2004 has no gradients)
+//! * overlap: -Σ W S^(X) with the energy-weighted density W of eq:W; UNCHECKED(Pulay1969)
+//! * exchange–correlation: eq:xc-grad (grid-weight derivatives neglected); UNCHECKED(Johnson1993)
+//! * nuclear repulsion: eq:vnn-grad. UNCHECKED(Szabo1996)
 //!
-//! All derivative integrals use the centre-derivative rule eq:center-deriv on
+//! All derivative integrals use the centre-derivative rule eq:center-deriv on UNCHECKED(Pulay1969)
 //! primitives with angular momentum ±1. Instead of transforming derivative integrals
 //! to the spherical d basis, the density-like matrices are transformed to the
 //! normalized Cartesian basis once (Σ_μν M_μν I_μν = Σ_cd (Tᵀ M T)_cd I^cart_cd with T
-//! the eq:sph-d matrix), which is equivalent because eq:sph-d commutes with the
+//! the eq:sph-d matrix), which is equivalent because eq:sph-d commutes with the UNCHECKED(Schlegel1995)
 //! derivative.
 //!
 //! Derivative ERIs are never stored: each unique shell quartet (8-fold symmetry,
-//! eq:eri-sym) is contracted with the symmetrized Γ on the fly, using the
-//! McMurchie–Davidson form of eq:eri. Per primitive quartet only the derivatives with
+//! eq:eri-sym) is contracted with the symmetrized Γ on the fly, using the UNCHECKED(Szabo1996)
+//! McMurchie–Davidson form of eq:eri. Per primitive quartet only the derivatives with VERIFIED(McMurchie1978, derived from Eqs. (3.30)-(3.34), p. 14 (preprint), with (2.27))
 //! respect to the centres A, B, C are evaluated; the D derivative follows from
 //! translational invariance (the four centre derivatives sum to zero). Quartets are
 //! skipped when the density-weighted Schwarz bound Q_ab Q_cd max|Γ| is below
@@ -230,7 +230,7 @@ fn one_electron_terms(mol: &Molecule, basis: &Basis, req: OneElectronRequest) ->
                                 }
                             }
                         }
-                        // Nuclear attraction, theory.typ eq:nuc, eq:hf-force.
+                        // Nuclear attraction, theory.typ eq:nuc, eq:hf-force. UNCHECKED(Szabo1996)
                         if req.p.is_some() {
                             let lmax = sa.l + 1 + sb.l;
                             for (ic, &(zc, rc)) in charges.iter().enumerate() {
@@ -427,8 +427,9 @@ fn dot(a: &[f64], b: &[f64]) -> f64 {
 ///   Q[ab][j] = Σ_i E^{ab}_i[ab] X_ij, and ∂/∂C = pref Σ_{ab,j} Z_C[ab][j] Q[ab][j];
 /// * ∂/∂D = −(∂/∂A + ∂/∂B + ∂/∂C) (translational invariance).
 ///
-/// `omega = Some(ω)` uses the operator erf(ωr)/r instead of 1/r (theory.typ eq:eri-erf;
-/// the centre-derivative rule is unchanged).
+/// `omega = Some(ω)` uses the operator erf(ωr)/r instead of 1/r (theory.typ eq:eri-erf; VERIFIED(Adamson1999, derived from Eqs. (1), (11)-(13), p. 922; the paper prints the erfc integral)
+/// the centre-derivative rule is unchanged, because the kernel depends only on r₁ − r₂
+/// and the centres enter only through the Hermite coefficients and P − Q).
 fn quartet_gradient(
     ab: &GradPair,
     cd: &GradPair,
@@ -866,7 +867,7 @@ mod tests {
                 let (j, k) = eri.coulomb_exchange(&p, true);
                 0.5 * p.dot(&j) - 0.25 * a_hf * p.dot(&k.unwrap())
             };
-            // theory.typ eq:cam-k, eq:cam-fock: ½ P·J − ¼ P·K^x.
+            // theory.typ eq:cam-k, eq:cam-fock: ½ P·J − ¼ P·K^x. VERIFIED(Yanai2004, derived from Eqs. (6), (7), p. 52)
             let f3 = |x: &[f64]| {
                 let b = basis(&mol_at(x), cart);
                 let eri = EriTensor::compute(&b, 0.0);

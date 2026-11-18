@@ -1,5 +1,5 @@
 //! Values and first/second Cartesian derivatives of the AO basis functions at
-//! arbitrary points (theory.typ eq:contracted, eq:ao-deriv, eq:sph-d).
+//! arbitrary points (theory.typ eq:contracted, eq:ao-deriv, eq:sph-d). UNCHECKED(Helgaker2000) UNCHECKED(Schlegel1995)
 //!
 //! A Cartesian component is χ = c_lmn P(r_A) g(r_A²) with P = x^l y^m z^n and
 //! g = Σ_k d̃_k e^{-a_k r_A²}. With G0 = g, G_i = ∂_i g = x_i R1 and
@@ -112,7 +112,7 @@ pub fn eval_ao_shells(basis: &Basis, shells: &[usize], points: &[[f64; 3]], deri
 }
 
 /// Fills `out[(comp * ncart + k) * np + g]` with the normalized Cartesian components
-/// of `sh` and their derivatives. theory.typ eq:contracted, eq:cart-norm, eq:ao-deriv
+/// of `sh` and their derivatives. theory.typ eq:contracted, eq:cart-norm, eq:ao-deriv UNCHECKED(Helgaker2000)
 fn eval_shell_cartesian(sh: &Shell, points: &[[f64; 3]], deriv: usize, out: &mut [f64]) {
     let np = points.len();
     let comps = cartesian_components(sh.l);

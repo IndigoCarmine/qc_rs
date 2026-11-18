@@ -4,3 +4,7 @@
 __pycache__/
 # Papers are collected locally for checking the implementation; they are not redistributed.
 /docs/papers/*.pdf
+# Typst transcriptions of the papers (local working copies, like the PDFs).
+/docs/papers/typst/
+# Claude Code worktrees and local settings
+/.claude/

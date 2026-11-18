@@ -67,7 +67,7 @@ pub struct GradientResult {
     pub energy: f64,
     /// dE/dR per atom (Hartree/Bohr).
     pub gradient: Vec<[f64; 3]>,
-    /// The individual terms of theory.typ eq:grad.
+    /// The individual terms of theory.typ eq:grad. UNCHECKED(Pulay1969)
     pub components: GradientComponents,
     /// The SCF the gradient was computed from.
     pub scf: ScfResult,

@@ -152,7 +152,7 @@ pub struct SymmetricEigen {
     pub vectors: Matrix,
 }
 
-/// Diagonalizes a symmetric matrix with the cyclic Jacobi method. theory.typ eq:jacobi
+/// Diagonalizes a symmetric matrix with the cyclic Jacobi method. theory.typ eq:jacobi UNCHECKED(Golub2013)
 pub fn symmetric_eigen(a: &Matrix) -> Result<SymmetricEigen> {
     if a.rows != a.cols {
         return Err(QcError::InvalidInput("eigen: matrix is not square".into()));

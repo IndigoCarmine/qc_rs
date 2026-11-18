@@ -1,15 +1,34 @@
-//! Short-range Becke 88 exchange of the Coulomb-attenuating method (CAM): the B88
-//! exchange that belongs to the part [1 − α − β erf(ωr)]/r of the split Coulomb
-//! operator, the rest being treated as exact exchange. theory.typ eq:cam-K, eq:cam-a,
-//! eq:cam-att, eq:cam-b88, eq:cam-series
+//! Becke 88 exchange of the Coulomb-attenuating method (CAM): the B88 exchange that
+//! belongs to the part [1 − α − β erf(ωr)]/r of the split Coulomb operator (a fraction
+//! 1 − α of B88 at short range, 1 − α − β at long range); the rest is exact exchange.
+//!
+//! Comparison with the papers (theory.typ labels):
+//! - eq:cam-K: the form E_x = −½ Σ_s ∫ ρ_s^(4/3) K_s and K^LSDA:
+//!   VERIFIED(Iikura2001, Eq. (2) and K^LSDA, p. 3541); the B88 expression for K_s:
+//!   VERIFIED(Becke1988, Eqs. (1b), (8), pp. 3098-3099)
+//! - eq:cam-a (a_s, b_s, c_s): VERIFIED(Tawada2004, Eqs. (5)-(7), p. 8426), also printed
+//!   in Yanai2004 Eqs. (3)-(5), p. 51; a_s alone follows from Iikura2001 Eq. (7).
+//! - eq:cam-att (A(a)): VERIFIED(Tawada2004, Eq. (4), p. 8426), the same as Yanai2004
+//!   Eq. (2), p. 51, and algebraically equal to Iikura2001 Eq. (8), p. 3541 (whose
+//!   printed subscript "K_a" is a misprint for K_σ).
+//! - eq:cam-b88 (the factor 1 − α − β A): VERIFIED(Yanai2004, derived from Eqs. (2)-(5), p. 51, and Eq. (7), p. 52).
+//!   The papers print only the case α = 0, β = 1 (factor 1 − A). The general factor is
+//!   not printed anywhere; it follows because the construction is linear in the
+//!   operator: 1 − α − β erf = (1 − α − β)·1 + β·erfc gives (1 − α − β) + β(1 − A).
+//! - eq:cam-series: DERIVED. Tawada2004 (p. 8426) warns about the cancellation at
+//!   large a_s but prints no expansion.
 //!
 //! References:
 //! - T. Yanai, D. P. Tew, N. C. Handy, Chem. Phys. Lett. 393, 51 (2004): CAM-B3LYP;
-//!   the three-parameter split (α, β, ω) of the operator and the values α = 0.19,
-//!   β = 0.46, ω = 0.33 used with B3LYP-type DFT exchange and correlation.
+//!   the three-parameter split of the operator (α, β and μ, written ω here), Eq. (7),
+//!   and the values α = 0.19, β = 0.46, μ = 0.33, used with full B88 exchange and the
+//!   correlation 0.19 VWN5 + 0.81 LYP.
 //! - H. Iikura, T. Tsuneda, T. Yanai, K. Hirao, J. Chem. Phys. 115, 3540 (2001): the
-//!   long-range correction scheme for GGA exchange — the erf-attenuated exchange
-//!   energy of a GGA written through its K_s and the attenuation factor A(a_s).
+//!   long-range correction scheme — the short-range ((1 − erf(μr))/r) part of a GGA
+//!   exchange written through its K_s, Eqs. (2), (7), (8).
+//! - Y. Tawada, T. Tsuneda, S. Yanagisawa, T. Yanai, K. Hirao, J. Chem. Phys. 120, 8425
+//!   (2004): the equivalent form with a_s, b_s, c_s, Eqs. (4)-(7), used here as
+//!   1 − A(a_s), and the remark on cancellation at large a_s.
 //! - A. D. Becke, Phys. Rev. A 38, 3098 (1988): the B88 exchange functional whose K_s
 //!   is attenuated here (β_B88 = 0.0042).
 

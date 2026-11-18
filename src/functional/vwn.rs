@@ -1,19 +1,29 @@
 //! Vosko–Wilk–Nusair correlation — a Padé-type fit of the correlation energy
-//! of the uniform electron gas as a function of r_s (LDA). theory.typ eq:vwn
+//! of the uniform electron gas as a function of r_s (LDA). theory.typ eq:vwn VERIFIED(Vosko1980, Eq. [4.4]; parameters Table 5 caption and p. 1207)
 //!
 //! Reference:
 //! - S. H. Vosko, L. Wilk, M. Nusair, Can. J. Phys. 58, 1200 (1980): gives the
-//!   functional form and several parameter sets. Two are used here (paramagnetic,
-//!   i.e. closed-shell, parameters only):
-//!   - VWN5: fitted to the Ceperley–Alder quantum Monte Carlo data; the
-//!     parametrization recommended in the paper ("VWN5", used in B3LYP5).
-//!   - VWN-RPA: fitted to the random-phase-approximation correlation energy
-//!     ("VWN3" in Gaussian, "VWN_RPA" in libxc); the one in Gaussian's B3LYP.
+//!   functional form (its Eq. [4.4], with x = r_s^(1/2)) and several parameter
+//!   sets. Two are used here (paramagnetic, i.e. closed-shell, parameters only):
+//!   - VWN5: the fit to the Ceperley–Alder Monte Carlo correlation energies at
+//!     r_s = 10, 20, 50, 100 (Table 5 caption, p. 1207). It is the paramagnetic
+//!     part of the spin interpolation the paper recommends (form V, p. 1209).
+//!   - VWN-RPA: the fit to the paper's own random-phase-approximation correlation
+//!     energies at the same r_s (text, p. 1207).
+//!   - A is the paper's 0.0621814 Ry converted to Hartree; x0, b, c are dimensionless.
+//!
+//! Checked against the paper: the formula term by term and every parameter digit.
+//! The code reproduces the fitted column of the paper's Table 5 to 0.005 mRy.
+//! The names "VWN5", "VWN-RPA" and "VWN3" are later program conventions, not the
+//! paper's (its numerals I–V label spin interpolations, which do not matter for a
+//! closed shell), and that Gaussian's B3LYP uses the RPA fit is not in this paper
+//! either; that identification rests on Stephens et al. 1994 and on the numerical
+//! agreement with PySCF's `b3lypg`.
 
 use crate::dual::Dual;
 use std::f64::consts::PI;
 
-/// Paramagnetic VWN parameters (A, x0, b, c). theory.typ section 9 table
+/// Paramagnetic VWN parameters (A in Hartree, x0, b, c). theory.typ `<sec:xc>`, table below eq:vwn
 #[derive(Debug, Clone, Copy)]
 pub(super) struct VwnParams {
     a: f64,

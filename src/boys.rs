@@ -1,4 +1,4 @@
-//! Boys function F_n(x). theory.typ eq:boys
+//! Boys function F_n(x). theory.typ eq:boys UNCHECKED(Helgaker2000)
 
 /// Fills `out[0..=nmax]` with F_0(x) … F_nmax(x) (x >= 0).
 ///
@@ -9,7 +9,7 @@ pub fn boys(nmax: usize, x: f64, out: &mut [f64]) {
     debug_assert!(x >= 0.0);
     let ex = (-x).exp();
     if x < 35.0 {
-        // theory.typ eq:boys-series
+        // theory.typ eq:boys-series UNCHECKED(Helgaker2000)
         let mut term = 1.0 / (2 * nmax + 1) as f64;
         let mut sum = term;
         let mut k = 1usize;
@@ -22,12 +22,12 @@ pub fn boys(nmax: usize, x: f64, out: &mut [f64]) {
             k += 1;
         }
         out[nmax] = ex * sum;
-        // theory.typ eq:boys-down
+        // theory.typ eq:boys-down UNCHECKED(Helgaker2000)
         for n in (1..=nmax).rev() {
             out[n - 1] = (2.0 * x * out[n] + ex) / (2 * n - 1) as f64;
         }
     } else {
-        // theory.typ eq:boys-up
+        // theory.typ eq:boys-up UNCHECKED(Helgaker2000)
         out[0] = 0.5 * (std::f64::consts::PI / x).sqrt();
         for n in 0..nmax {
             out[n + 1] = ((2 * n + 1) as f64 * out[n] - ex) / (2.0 * x);

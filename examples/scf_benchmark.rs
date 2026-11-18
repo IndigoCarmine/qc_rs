@@ -28,12 +28,58 @@
 //!
 //! For a DFT energy the time spent in the phases of the XC integration (summed over
 //! the SCF iterations of the last run) is printed after the J/K statistics.
+//!
+//! # Measuring the gradient terms
+//!
+//! With `--gradient` the steps of `Calculation::gradient` are done one by one (the SCF
+//! with the commutator threshold tightened to `GRADIENT_SCF_ERROR_TOLERANCE`, then the
+//! public term functions of `qc_rs::gradient`), and the wall time of each term of
+//! eq:grad is printed: one-electron, overlap (with W), two-electron, XC and nuclear
+//! repulsion. The two-electron term is also reported as the minimum over `--repeat`
+//! runs. To check that a change leaves the gradient bit-identical, compare the printed
+//! FNV-1a hashes of the f64 bit patterns of the two-electron and the total gradient
+//! between the two commits, e.g.
+//!
+//! ```sh
+//! cargo run --release --example scf_benchmark -- \
+//!     examples/molecules/barph_acetanilide_dimer.xyz --basis 6-31g --gradient
+//! ```
+//!
+//! The hashes are only comparable on the same machine and OS: the Boys function uses
+//! `exp`, whose last bit depends on the platform's libm.
 
+use qc_rs::calculation::GRADIENT_SCF_ERROR_TOLERANCE;
 use qc_rs::dft::XcOptions;
+use qc_rs::gradient::{
+    energy_weighted_density, nuclear_repulsion_gradient, one_electron_gradient, overlap_gradient,
+    two_electron_gradient, xc_gradient,
+};
 use qc_rs::{
-    Calculation, GridSettings, IntegralStrategy, MolecularGrid, Molecule, ScfOptions, Unit, XcIntegrator, run_scf,
+    Calculation, GradientComponents, GridSettings, IntegralStrategy, MolecularGrid, Molecule, ScfOptions, Unit,
+    XcIntegrator, run_scf,
 };
 use std::time::Instant;
+
+/// FNV-1a (64 bit) over the little-endian bit patterns of the gradient entries.
+fn fnv1a(g: &[[f64; 3]]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in g.iter().flatten().flat_map(|x| x.to_bits().to_le_bytes()) {
+        h ^= u64::from(byte);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+/// Wall time (s) of each gradient term, in the order of [`TERM_LABELS`].
+type TermTimes = [f64; 5];
+const TERM_LABELS: [&str; 5] = ["one-electron", "overlap (with W)", "two-electron", "xc", "nuclear repulsion"];
+
+/// `f()` and its wall time in seconds.
+fn timed<T>(f: impl FnOnce() -> T) -> (T, f64) {
+    let t0 = Instant::now();
+    let r = f();
+    (r, t0.elapsed().as_secs_f64())
+}
 
 fn builtin(name: &str) -> Option<Molecule> {
     match name {
@@ -90,12 +136,39 @@ fn main() -> qc_rs::Result<()> {
     let repeat: usize = value("--repeat").map_or(1, |n| n.parse().expect("--repeat takes a positive integer"));
     assert!(repeat >= 1, "--repeat takes a positive integer");
     let mut times = Vec::with_capacity(repeat);
+    let mut two_electron_times = Vec::with_capacity(repeat);
     let mut result = None;
     for _ in 0..repeat {
         let t0 = Instant::now();
         result = Some(if args.iter().any(|a| a == "--gradient") {
-            let g = calc.gradient()?;
-            (g.energy, g.scf, None)
+            // The same steps as `Calculation::gradient` (`rks_gradient` term by term),
+            // done here to time each term of eq:grad.
+            let basis = calc.basis_for(&mol)?;
+            let grid = if calc.functional().has_density_part() {
+                MolecularGrid::new(&mol, GridSettings::default())?
+            } else {
+                MolecularGrid { points: vec![], weights: vec![], blocks: vec![], settings: GridSettings::default() }
+            };
+            let mut xc = XcIntegrator::with_grid(&basis, calc.functional(), grid, XcOptions::default())?;
+            let grad_opts =
+                ScfOptions { error_tolerance: opts.error_tolerance.min(GRADIENT_SCF_ERROR_TOLERANCE), ..opts.clone() };
+            let scf = run_scf(&mol, &basis, &mut xc, &grad_opts)?;
+            let p = &scf.density;
+            let (one_electron, t_one) = timed(|| one_electron_gradient(&mol, &basis, p));
+            let (overlap, t_overlap) = timed(|| overlap_gradient(&mol, &basis, &energy_weighted_density(&scf)));
+            let (two_electron, t_two) =
+                timed(|| two_electron_gradient(&mol, &basis, p, calc.functional().exchange_kernel()));
+            let (xc_part, t_xc) = timed(|| xc_gradient(&mol, &basis, &xc, p));
+            let (nuclear_repulsion, t_nuc) = timed(|| nuclear_repulsion_gradient(&mol));
+            let components = GradientComponents {
+                one_electron: one_electron?,
+                two_electron: two_electron?,
+                overlap: overlap?,
+                xc: xc_part?,
+                nuclear_repulsion,
+            };
+            two_electron_times.push(t_two);
+            (scf.energy, scf, None, Some((components, [t_one, t_overlap, t_two, t_xc, t_nuc])))
         } else {
             // The same steps as `Calculation::energy` (default grid, default XC
             // options), done here to keep the integrator and read its phase times.
@@ -108,11 +181,12 @@ fn main() -> qc_rs::Result<()> {
             let mut xc = XcIntegrator::with_grid(&basis, calc.functional(), grid, XcOptions::default())?;
             let scf = run_scf(&mol, &basis, &mut xc, &opts)?;
             let xc_times = calc.functional().has_density_part().then(|| xc.phase_times());
-            (scf.energy, scf, xc_times)
+            (scf.energy, scf, xc_times, None)
         });
         times.push(t0.elapsed().as_secs_f64());
     }
-    let (energy, scf, xc_times) = result.expect("at least one run");
+    let (energy, scf, xc_times, gradient): (_, _, _, Option<(GradientComponents, TermTimes)>) =
+        result.expect("at least one run");
     let total = times.iter().copied().fold(f64::INFINITY, f64::min);
     println!(
         "{name} {method}/{basis}{} nao={} threads={} strategy={:?}",
@@ -170,5 +244,14 @@ fn main() -> qc_rs::Result<()> {
         }
         println!("  recomputed blocks: {} over all evaluations", t.recomputed_blocks);
     }
+    if let Some((components, term_times)) = gradient {
+        println!("gradient terms (wall, last run):");
+        for (label, s) in TERM_LABELS.iter().zip(term_times) {
+            println!("  {label:18} {s:9.3} s");
+        }
+        let two_min = two_electron_times.iter().copied().fold(f64::INFINITY, f64::min);
+        println!("  two-electron min {two_min:.3} s of {repeat} runs");
+        println!("  hash two-electron {:016x}", fnv1a(&components.two_electron));
+        println!("  hash total        {:016x}", fnv1a(&components.total()));    }
     Ok(())
 }

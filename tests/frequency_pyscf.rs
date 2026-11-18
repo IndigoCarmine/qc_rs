@@ -1,9 +1,13 @@
 //! Harmonic analysis (theory.typ sec:freq: eq:mass-weight, eq:tr-vectors, eq:freq,
 //! eq:reduced-mass) fed with the PySCF Hessians of tests/reference/pyscf_reference.json
 //! ("hessians"), so that only the analysis is tested, not the SCF; and thermochemistry
-//! (eq:thermo-trans … eq:thermo-total) fed with PySCF's wavenumbers.
+//! (eq:thermo-trans … eq:thermo-total) fed with PySCF's wavenumbers. Then
+//! `Calculation::frequencies` end to end (our own SCF, gradient and numerical Hessian).
 
-use qc_rs::{Matrix, Molecule, ThermoSettings, Unit, harmonic_analysis, standard_atomic_mass, thermochemistry};
+use qc_rs::{
+    Calculation, DEFAULT_HESSIAN_STEP, FrequencySettings, GridSettings, Matrix, Molecule, ThermoSettings, Unit, harmonic_analysis,
+    standard_atomic_mass, thermochemistry,
+};
 use serde_json::Value;
 
 fn load_reference() -> Value {
@@ -195,4 +199,131 @@ fn thermochemistry_matches_pyscf() {
         }
     }
     assert!(saw_linear);
+}
+
+/// Largest deviations from PySCF of one end-to-end case.
+struct EndToEnd {
+    hessian: f64,
+    frequency: f64,
+    thermo: f64,
+}
+
+/// `Calculation::frequencies` (numerical Hessian from our own SCF and analytic gradient,
+/// then harmonic analysis and thermochemistry) at the PySCF-optimised geometry of every
+/// "hessians" entry with this `method`, against PySCF's analytic Hessian, wavenumbers and
+/// thermo.thermo. DFT uses GridSettings::fine(); PySCF used (150, 1202) Lebedev.
+///
+/// ZPE, H and G are compared at the T' that reproduces PySCF's k_B T, as in
+/// thermochemistry_matches_pyscf (PySCF's E_h/k_B is the CODATA 2014 value).
+fn end_to_end(method: &str, step: f64) -> Vec<(String, EndToEnd)> {
+    let reference = load_reference();
+    let mut out = Vec::new();
+    for entry in reference["hessians"].as_array().unwrap().iter().filter(|e| e["method"] == method) {
+        let name = label(entry);
+        let mol = molecule(entry);
+        let n = 3 * mol.atoms().len();
+        let is_hf = method == "rhf";
+        let calc = Calculation::new(&mol, if is_hf { "hf" } else { method }, entry["basis"].as_str().unwrap())
+            .unwrap()
+            .with_grid(GridSettings::fine());
+        let first = &entry["thermo"][0];
+        let settings = FrequencySettings {
+            thermo: ThermoSettings {
+                temperature: first["temperature_k"].as_f64().unwrap(),
+                pressure: first["pressure_pa"].as_f64().unwrap(),
+                symmetry_number: first["sym_number"].as_u64().unwrap() as u32,
+            },
+            step,
+            masses: None,
+        };
+        let r = calc.frequencies(&settings).unwrap();
+        assert!(r.max_abs_gradient < 1e-5, "{name}: not a stationary point, |g| = {:e}", r.max_abs_gradient);
+
+        let h = rows(&entry["hessian"]);
+        let d_hess = (0..n).flat_map(|i| (0..n).map(move |j| (i, j))).fold(0.0_f64, |m, (i, j)| {
+            m.max((r.hessian.hessian[(i, j)] - h[i][j]).abs())
+        });
+
+        let freq_ref = f64s(&entry["freq_wavenumber"]);
+        assert_eq!(r.analysis.frequencies_cm1.len(), freq_ref.len(), "{name}");
+        let d_freq = r.analysis.frequencies_cm1.iter().zip(&freq_ref).fold(0.0_f64, |m, (a, b)| m.max((a - b).abs()));
+
+        // Every thermo entry (both T, p) through T', with our wavenumbers and E_el.
+        let mut d_thermo = 0.0_f64;
+        for t in entry["thermo"].as_array().unwrap() {
+            let g = |k: &str| t[k].as_f64().unwrap();
+            let ts = ThermoSettings {
+                temperature: g("temperature_k"),
+                pressure: g("pressure_pa"),
+                symmetry_number: t["sym_number"].as_u64().unwrap() as u32,
+            };
+            let at_t = thermochemistry(&mol, None, &r.analysis.frequencies_cm1, r.thermo.electronic_energy, &ts).unwrap();
+            let t_prime = ts.temperature * (g("H_tot") - g("E_tot")) / (at_t.enthalpy - at_t.internal_energy);
+            let th = thermochemistry(
+                &mol,
+                None,
+                &r.analysis.frequencies_cm1,
+                r.thermo.electronic_energy,
+                &ThermoSettings { temperature: t_prime, ..ts },
+            )
+            .unwrap();
+            assert_eq!(th.n_excluded_modes, 0, "{name}");
+            for (a, b) in [(th.zero_point_energy, g("ZPE")), (th.enthalpy, g("H_tot")), (th.gibbs_energy, g("G_tot"))] {
+                d_thermo = d_thermo.max((a - b).abs());
+            }
+        }
+        // The thermochemistry of frequencies() is that of its own wavenumbers at (T, p).
+        let direct =
+            thermochemistry(&mol, None, &r.analysis.frequencies_cm1, r.hessian.energy, &settings.thermo).unwrap();
+        assert_eq!(r.thermo, direct, "{name}");
+        println!("{name} h = {step}: Hessian {d_hess:.2e} Eh/Bohr², wavenumber {d_freq:.3} cm⁻¹, ZPE/H/G {d_thermo:.2e} Eh");
+        out.push((name, EndToEnd { hessian: d_hess, frequency: d_freq, thermo: d_thermo }));
+    }
+    assert!(!out.is_empty(), "no {method} entries");
+    out
+}
+
+/// RHF/6-31G* (H2O, NH3, HCN). At the default h = 5e-3 the wavenumbers (worst
+/// measured 0.062 cm⁻¹) and ZPE/H/G (3.3e-7 E_h, HCN) are checked.
+///
+/// The Hessian elements are checked at h = 1.25e-3: at the default h the O(h²)
+/// truncation error of eq:hess-fd reaches 7.6e-5 E_h/Bohr² for HCN (the C≡N stretch,
+/// large third derivatives), and the deviation from PySCF's analytic Hessian falls by
+/// 4 per halving of h (HCN 7.6e-5, 1.9e-5, 4.7e-6; H2O 9.0e-6, 2.3e-6, 5.7e-7 for
+/// h = 5e-3, 2.5e-3, 1.25e-3), so it is that truncation error, not a wrong gradient.
+/// Limits ≈ 2–3 × the measured worst: Hessian 1e-5 E_h/Bohr², 0.2 cm⁻¹, 1e-6 E_h.
+#[test]
+fn frequencies_end_to_end_rhf() {
+    for (name, d) in end_to_end("rhf", DEFAULT_HESSIAN_STEP) {
+        assert!(d.frequency <= 0.2, "{name}: wavenumber deviation {} cm⁻¹", d.frequency);
+        assert!(d.thermo <= 1e-6, "{name}: ZPE/H/G deviation {:e} E_h", d.thermo);
+    }
+    for (name, d) in end_to_end("rhf", 1.25e-3) {
+        assert!(d.hessian <= 1e-5, "{name}: Hessian deviation {:e} E_h/Bohr²", d.hessian);
+    }
+}
+
+/// DFT at the default h on GridSettings::fine() (PySCF: (150, 1202) Lebedev, no grid
+/// response in its Hessian). Worst measured: Hessian 1.9e-5 E_h/Bohr² (NH3 B3LYP),
+/// wavenumber 0.057 cm⁻¹, ZPE/H/G 2.4e-7 E_h (NH3 B3LYP). With smaller h the Hessian
+/// deviation levels off near 1e-6 (1.2e-6 at h = 1.25e-3: grid and grid response).
+/// Limits ≈ 2–4 × the measured worst: 4e-5 E_h/Bohr², 0.2 cm⁻¹, 1e-6 E_h.
+fn check_dft_end_to_end(method: &str) {
+    for (name, d) in end_to_end(method, DEFAULT_HESSIAN_STEP) {
+        assert!(d.hessian <= 4e-5, "{name}: Hessian deviation {:e} E_h/Bohr²", d.hessian);
+        assert!(d.frequency <= 0.2, "{name}: wavenumber deviation {} cm⁻¹", d.frequency);
+        assert!(d.thermo <= 1e-6, "{name}: ZPE/H/G deviation {:e} E_h", d.thermo);
+    }
+}
+
+/// B3LYP (VWN-RPA, PySCF "b3lypg")/6-31G: H2O, NH3.
+#[test]
+fn frequencies_end_to_end_b3lyp() {
+    check_dft_end_to_end("b3lypg");
+}
+
+/// CAM-B3LYP/6-31G: H2O.
+#[test]
+fn frequencies_end_to_end_cam_b3lyp() {
+    check_dft_end_to_end("camb3lyp");
 }

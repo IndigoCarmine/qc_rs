@@ -1,6 +1,7 @@
 //! High-level driver: a molecule, a method ("hf" or a functional name) and a basis
-//! set name, with single-point energy, analytic gradient and geometry optimization,
-//! optionally with the DFT-D3 dispersion correction.
+//! set name, with single-point energy, analytic gradient, geometry optimization and
+//! harmonic frequencies with thermochemistry, optionally with the DFT-D3 dispersion
+//! correction.
 //!
 //! ```no_run
 //! use qc_rs::{Calculation, D3Variant, Molecule, OptimizerSettings, Unit};
@@ -29,11 +30,13 @@ use crate::error::{QcError, Result};
 use crate::functional::Functional;
 use crate::gradient::{GradientComponents, rks_gradient};
 use crate::grid::{GridSettings, MolecularGrid};
-use crate::hessian::central_difference_hessian;
+use crate::hessian::{DEFAULT_HESSIAN_STEP, central_difference_hessian};
 use crate::linalg::Matrix;
 use crate::molecule::Molecule;
 use crate::optimize::{OptimizationStep, OptimizerSettings, bfgs_minimize};
 use crate::scf::{IntegralStrategy, ScfOptions, ScfResult, run_scf};
+use crate::thermo::{ThermoSettings, Thermochemistry, check_settings as check_thermo_settings, thermochemistry};
+use crate::vibration::{HarmonicAnalysis, harmonic_analysis, resolve_masses};
 
 /// SCF convergence (max |e| of the DIIS commutator) used for gradients and
 /// optimizations when the user's [`ScfOptions::error_tolerance`] is looser.
@@ -114,6 +117,43 @@ pub struct HessianResult {
     pub displaced_scf_iterations: usize,
     /// The SCF at the reference geometry.
     pub scf: ScfResult,
+}
+
+/// Settings of [`Calculation::frequencies`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct FrequencySettings {
+    /// Displacement h (Bohr) of the numerical Hessian (theory.typ eq:hess-fd); default
+    /// [`DEFAULT_HESSIAN_STEP`].
+    pub step: f64,
+    /// Atomic masses (u, one per atom); `None` uses [`crate::standard_atomic_mass`]
+    /// (theory.typ eq:mass-weight).
+    pub masses: Option<Vec<f64>>,
+    /// Temperature, pressure and the rotational symmetry number σ (given by the user,
+    /// not determined automatically) of the thermochemistry.
+    pub thermo: ThermoSettings,
+}
+
+impl Default for FrequencySettings {
+    fn default() -> Self {
+        Self { step: DEFAULT_HESSIAN_STEP, masses: None, thermo: ThermoSettings::default() }
+    }
+}
+
+/// Result of [`Calculation::frequencies`].
+#[derive(Debug, Clone)]
+pub struct FrequencyResult {
+    /// The numerical Hessian of the total energy, with the energy and gradient at the
+    /// reference geometry.
+    pub hessian: HessianResult,
+    /// Harmonic wavenumbers (cm⁻¹, ascending, imaginary as negative), normal modes and
+    /// reduced masses (theory.typ eq:mass-weight … eq:reduced-mass).
+    pub analysis: HarmonicAnalysis,
+    /// RRHO thermochemistry (theory.typ eq:thermo-total) with E_el = the total energy
+    /// at the reference geometry, including the dispersion energy if any.
+    pub thermo: Thermochemistry,
+    /// max_A,α |dE/dR_Aα| at the reference geometry (Hartree/Bohr). The analysis is
+    /// meaningful only at a stationary point, where this is ~0 (theory.typ sec:freq).
+    pub max_abs_gradient: f64,
 }
 
 /// Result of [`Calculation::optimize`].
@@ -322,6 +362,30 @@ impl Calculation {
             displaced_scf_iterations,
             scf: reference.scf,
         })
+    }
+
+    /// Harmonic frequencies and thermochemistry (theory.typ sec:freq) at this
+    /// calculation's geometry: the Hessian of [`Calculation::hessian`] with
+    /// `settings.step` (6N + 1 SCF + gradient evaluations), [`crate::harmonic_analysis`]
+    /// with `settings.masses`, and [`crate::thermochemistry`] with `settings.thermo` and
+    /// E_el = the total energy (eq:thermo-total, including the dispersion energy if any).
+    /// DERIVED
+    ///
+    /// The geometry should be a stationary point (e.g. from [`Calculation::optimize`]);
+    /// check [`FrequencyResult::max_abs_gradient`]. Imaginary frequencies are negative
+    /// wavenumbers and are left out of the thermochemistry
+    /// ([`Thermochemistry::n_excluded_modes`]). The symmetry number is not determined
+    /// automatically. Invalid settings are reported before any SCF runs.
+    pub fn frequencies(&self, settings: &FrequencySettings) -> Result<FrequencyResult> {
+        resolve_masses(&self.molecule, settings.masses.as_deref())?;
+        check_thermo_settings(&settings.thermo)?;
+        let hessian = self.hessian(settings.step)?;
+        let masses = settings.masses.as_deref();
+        let analysis = harmonic_analysis(&self.molecule, &hessian.hessian, masses)?;
+        let thermo =
+            thermochemistry(&self.molecule, masses, &analysis.frequencies_cm1, hessian.energy, &settings.thermo)?;
+        let max_abs_gradient = hessian.gradient.iter().flatten().fold(0.0_f64, |m, g| m.max(g.abs()));
+        Ok(FrequencyResult { hessian, analysis, thermo, max_abs_gradient })
     }
 
     /// Geometry optimization (theory.typ section 11) starting from this calculation's

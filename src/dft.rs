@@ -19,6 +19,7 @@ use crate::linalg::Matrix;
 use crate::molecule::Molecule;
 use crate::scf::{ExchangeCorrelation, ScfOptions, ScfResult, XcTerm, run_scf};
 use rayon::prelude::*;
+use std::time::Instant;
 
 /// Points with ρ below this contribute nothing to E_xc and V^xc. theory.typ section 8.3
 pub const RHO_CUTOFF: f64 = 1e-10;
@@ -50,6 +51,59 @@ pub struct XcEvaluation {
     pub potential: Matrix,
     /// Σ_g w_g ρ_g (≈ N_elec; grid-accuracy diagnostic).
     pub electron_count: f64,
+}
+
+/// Time spent in the phases of the XC integration of one [`XcIntegrator`], summed
+/// over its [`ExchangeCorrelation::evaluate`] calls (the SCF iterations). Timing
+/// only reads the clock around each phase; it does not change the order of any
+/// floating-point operation.
+///
+/// The per-block phases run in parallel, so their times are thread-seconds (the sum
+/// over blocks of the time each block spent in that phase), not wall time; compare
+/// them with `parallel_wall_seconds` × the number of threads.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[non_exhaustive]
+pub struct XcPhaseTimes {
+    /// Number of evaluations included.
+    pub evaluations: usize,
+    /// Wall time of computing the cached AO values when the integrator was built.
+    pub ao_cache_seconds: f64,
+    /// Blocks whose AO values were not cached and were recomputed, summed over
+    /// evaluations.
+    pub recomputed_blocks: usize,
+    /// AO values χ, ∇χ of the blocks outside the cache (thread-seconds).
+    pub ao_seconds: f64,
+    /// Gathering the block's sub-matrix of P (thread-seconds).
+    pub gather_seconds: f64,
+    /// [`density_on_points`]: t = Pχ, ρ and ∇ρ (thread-seconds).
+    pub density_seconds: f64,
+    /// [`xc_on_points`] with Σ w ρ and Σ w f (thread-seconds).
+    pub functional_seconds: f64,
+    /// Building φ_ν(g) (thread-seconds).
+    pub phi_seconds: f64,
+    /// M = χ φᵀ and V = M + Mᵀ on the block (thread-seconds).
+    pub products_seconds: f64,
+    /// Wall time of the parallel loop over blocks.
+    pub parallel_wall_seconds: f64,
+    /// Wall time of the serial sum over blocks in block order (E_xc, Σ w ρ and the
+    /// scatter of the block V into V^xc).
+    pub reduction_seconds: f64,
+}
+
+impl XcPhaseTimes {
+    fn add(&mut self, o: &XcPhaseTimes) {
+        self.evaluations += o.evaluations;
+        self.ao_cache_seconds += o.ao_cache_seconds;
+        self.recomputed_blocks += o.recomputed_blocks;
+        self.ao_seconds += o.ao_seconds;
+        self.gather_seconds += o.gather_seconds;
+        self.density_seconds += o.density_seconds;
+        self.functional_seconds += o.functional_seconds;
+        self.phi_seconds += o.phi_seconds;
+        self.products_seconds += o.products_seconds;
+        self.parallel_wall_seconds += o.parallel_wall_seconds;
+        self.reduction_seconds += o.reduction_seconds;
+    }
 }
 
 /// ρ, ∇ρ, f, v_ρ and v_σ at the points of one block.
@@ -307,6 +361,7 @@ pub struct XcIntegrator {
     blocks: Vec<BlockSetup>,
     cache: Vec<Option<AoValues>>,
     last: Option<(f64, f64)>,
+    times: XcPhaseTimes,
 }
 
 impl XcIntegrator {
@@ -355,6 +410,7 @@ impl XcIntegrator {
                 }
             })
             .collect();
+        let cache_start = Instant::now();
         let cache = if functional.has_density_part() {
             blocks
                 .par_iter()
@@ -367,7 +423,8 @@ impl XcIntegrator {
         } else {
             vec![None; blocks.len()]
         };
-        Ok(XcIntegrator { functional: functional.clone(), basis: basis.clone(), grid, deriv, blocks, cache, last: None })
+        let times = XcPhaseTimes { ao_cache_seconds: cache_start.elapsed().as_secs_f64(), ..XcPhaseTimes::default() };
+        Ok(XcIntegrator { functional: functional.clone(), basis: basis.clone(), grid, deriv, blocks, cache, last: None, times })
     }
 
     /// The grid.
@@ -395,12 +452,25 @@ impl XcIntegrator {
         self.last.map(|l| l.1)
     }
 
+    /// Time spent in each phase of the XC integration, summed over the
+    /// [`ExchangeCorrelation::evaluate`] calls so far (calls of
+    /// [`XcIntegrator::evaluate_density`] alone are not included).
+    pub fn phase_times(&self) -> XcPhaseTimes {
+        self.times
+    }
+
     /// E_xc, V^xc and Σ w ρ for density matrix `p`. theory.typ eq:rho, eq:exc, eq:vxc
     pub fn evaluate_density(&self, p: &Matrix) -> XcEvaluation {
+        self.evaluate_density_timed(p).0
+    }
+
+    /// [`XcIntegrator::evaluate_density`] and the time spent in each of its phases.
+    fn evaluate_density_timed(&self, p: &Matrix) -> (XcEvaluation, XcPhaseTimes) {
         let n = self.basis.nao();
         assert_eq!((p.rows(), p.cols()), (n, n), "density matrix shape");
         let gga = self.deriv >= 1;
-        let parts: Vec<Option<(f64, f64, Vec<f64>)>> = (0..self.blocks.len())
+        let parallel_start = Instant::now();
+        let parts: Vec<_> = (0..self.blocks.len())
             .into_par_iter()
             .map(|ib| {
                 let setup = &self.blocks[ib];
@@ -408,23 +478,36 @@ impl XcIntegrator {
                 if na == 0 {
                     return None;
                 }
+                let mut bt = XcPhaseTimes::default();
+                let mut clock = Instant::now();
+                let mut lap = || {
+                    let now = Instant::now();
+                    let dt = (now - clock).as_secs_f64();
+                    clock = now;
+                    dt
+                };
                 let range = self.grid.blocks[ib].range.clone();
                 let computed;
                 let ao = match &self.cache[ib] {
                     Some(a) => a,
                     None => {
                         computed = eval_ao_shells(&self.basis, &setup.shells, &self.grid.points[range.clone()], self.deriv);
+                        bt.recomputed_blocks = 1;
                         &computed
                     }
                 };
+                bt.ao_seconds = lap();
                 let w = &self.grid.weights[range];
                 let np = w.len();
                 let psub: Vec<f64> =
                     setup.aos.iter().flat_map(|&a| setup.aos.iter().map(move |&b| p[(a, b)])).collect();
+                bt.gather_seconds = lap();
                 let (rho, grad, _) = density_on_points(ao, &psub, gga);
+                bt.density_seconds = lap();
                 let nel: f64 = rho.iter().zip(w).map(|(r, wg)| r * wg).sum();
                 let pd = xc_on_points(&self.functional, rho, grad);
                 let exc: f64 = pd.f.iter().zip(w).map(|(f, wg)| f * wg).sum();
+                bt.functional_seconds = lap();
                 // φ_ν(g) = w [½ v_ρ χ_ν + 2 v_σ ∇ρ·∇χ_ν]; V = M + Mᵀ with M_μν = Σ_g χ_μ φ_ν
                 // reproduces theory.typ eq:vxc.
                 let chi = ao.component(0);
@@ -444,6 +527,7 @@ impl XcIntegrator {
                         }
                     }
                 }
+                bt.phi_seconds = lap();
                 let v = ao_products(chi, &phi, na, np);
                 let mut vs = vec![0.0; na * na];
                 for a in 0..na {
@@ -451,15 +535,20 @@ impl XcIntegrator {
                         vs[a * na + b] = v[a * na + b] + v[b * na + a];
                     }
                 }
-                Some((exc, nel, vs))
+                bt.products_seconds = lap();
+                Some((exc, nel, vs, bt))
             })
             .collect();
+        let mut times = XcPhaseTimes { evaluations: 1, ..XcPhaseTimes::default() };
+        times.parallel_wall_seconds = parallel_start.elapsed().as_secs_f64();
+        let reduction_start = Instant::now();
         // Deterministic reduction in block order.
         let mut energy = 0.0;
         let mut electron_count = 0.0;
         let mut potential = Matrix::zeros(n, n);
         for (ib, part) in parts.into_iter().enumerate() {
-            let Some((e, nel, vs)) = part else { continue };
+            let Some((e, nel, vs, bt)) = part else { continue };
+            times.add(&bt);
             energy += e;
             electron_count += nel;
             let aos = &self.blocks[ib].aos;
@@ -470,7 +559,8 @@ impl XcIntegrator {
                 }
             }
         }
-        XcEvaluation { energy, potential, electron_count }
+        times.reduction_seconds = reduction_start.elapsed().as_secs_f64();
+        (XcEvaluation { energy, potential, electron_count }, times)
     }
 }
 
@@ -487,7 +577,8 @@ impl ExchangeCorrelation for XcIntegrator {
         if !self.functional.has_density_part() {
             return Ok(None);
         }
-        let ev = self.evaluate_density(density);
+        let (ev, times) = self.evaluate_density_timed(density);
+        self.times.add(&times);
         self.last = Some((ev.energy, ev.electron_count));
         Ok(Some(XcTerm { energy: ev.energy, potential: ev.potential }))
     }
@@ -590,6 +681,31 @@ mod tests {
         let (ea, eb) = (a.evaluate_density(&p), b.evaluate_density(&p));
         assert_eq!(ea.energy, eb.energy);
         assert_eq!(ea.potential, eb.potential);
+    }
+
+    #[test]
+    fn phase_times_accumulate_over_evaluations() {
+        let mol = water();
+        let basis = Basis::from_name(&mol, "6-31g").unwrap();
+        let p = run_rhf(&mol, &basis, &ScfOptions::default()).unwrap().density;
+        let fun = Functional::b3lyp();
+        let grid = MolecularGrid::new(&mol, GridSettings::default()).unwrap();
+        let mut xc = XcIntegrator::with_grid(&basis, &fun, grid, XcOptions { ao_cache_bytes: 0 }).unwrap();
+        assert_eq!(xc.phase_times().evaluations, 0);
+        let direct = xc.evaluate_density(&p);
+        assert_eq!(xc.phase_times().evaluations, 0, "evaluate_density alone is not counted");
+        let term = xc.evaluate(&p).unwrap().unwrap();
+        xc.evaluate(&p).unwrap();
+        // The timed path gives bit-identical results.
+        assert_eq!(term.energy, direct.energy);
+        assert_eq!(term.potential, direct.potential);
+        let t = xc.phase_times();
+        assert_eq!(t.evaluations, 2);
+        let active = (0..xc.grid().blocks.len()).filter(|&b| !xc.block_aos(b).is_empty()).count();
+        assert_eq!(t.recomputed_blocks, 2 * active, "nothing is cached with a zero budget");
+        let phases = [t.ao_seconds, t.gather_seconds, t.density_seconds, t.functional_seconds, t.phi_seconds];
+        assert!(phases.iter().chain([&t.products_seconds, &t.parallel_wall_seconds, &t.reduction_seconds]).all(|&s| s >= 0.0));
+        assert!(t.ao_seconds > 0.0 && t.parallel_wall_seconds > 0.0);
     }
 
     /// Previous row-axpy form of t (skips P_ab = 0).

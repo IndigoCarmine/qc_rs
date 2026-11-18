@@ -83,10 +83,10 @@ pub struct XcPhaseTimes {
     pub phi_seconds: f64,
     /// M = χ φᵀ and V = M + Mᵀ on the block (thread-seconds).
     pub products_seconds: f64,
-    /// Wall time of the parallel loop over blocks.
+    /// Wall time of the parallel loops over blocks.
     pub parallel_wall_seconds: f64,
-    /// Wall time of the serial sum over blocks in block order (E_xc, Σ w ρ and the
-    /// scatter of the block V into V^xc).
+    /// Wall time of the sums over blocks in block order (E_xc, Σ w ρ and the
+    /// scatter of the block V into V^xc, parallel over the rows of V^xc).
     pub reduction_seconds: f64,
 }
 
@@ -347,8 +347,50 @@ fn ao_products_tiled(x: &[f64], y: &[f64], na: usize, np: usize) -> Vec<f64> {
 #[derive(Debug, Clone)]
 struct BlockSetup {
     shells: Vec<usize>,
+    /// Active AO indices, strictly increasing.
     aos: Vec<usize>,
+    /// Maximal runs of consecutive AO indices in `aos`: `(position in aos, first AO,
+    /// length)`, so that `aos[pos..pos + len] == first..first + len`.
+    runs: Vec<(usize, usize, usize)>,
 }
+
+impl BlockSetup {
+    fn new(shells: Vec<usize>, aos: Vec<usize>) -> Self {
+        // Shells are in AO order (Basis numbers them consecutively); the reduction
+        // relies on this to find a row with a binary search.
+        assert!(aos.windows(2).all(|w| w[0] < w[1]), "active AOs must be increasing");
+        let mut runs: Vec<(usize, usize, usize)> = Vec::new();
+        for (pos, &a) in aos.iter().enumerate() {
+            match runs.last_mut() {
+                Some((_, first, len)) if *first + *len == a => *len += 1,
+                _ => runs.push((pos, a, 1)),
+            }
+        }
+        BlockSetup { shells, aos, runs }
+    }
+
+    /// The block's sub-matrix P[aos, aos] (row-major `na × na`) of the `n × n`
+    /// row-major `p`, copied run by run.
+    fn gather(&self, p: &[f64], n: usize) -> Vec<f64> {
+        let na = self.aos.len();
+        let mut sub = vec![0.0; na * na];
+        for (dst, &a) in sub.chunks_exact_mut(na.max(1)).zip(&self.aos) {
+            let row = &p[a * n..(a + 1) * n];
+            for &(pos, first, len) in &self.runs {
+                dst[pos..pos + len].copy_from_slice(&row[first..first + len]);
+            }
+        }
+        sub
+    }
+}
+
+/// Per-block result of the parallel phase: E_xc and Σ w ρ of the block, its
+/// `na × na` potential V[aos, aos] and its phase times.
+type BlockPart = (f64, f64, Vec<f64>, XcPhaseTimes);
+
+/// Upper bound (bytes) on the block potentials held at once: blocks are processed in
+/// consecutive chunks of at most this size (a chunk has at least one block).
+const REDUCTION_CHUNK_BYTES: usize = 256 << 20;
 
 /// Numerical integrator of the XC energy and potential for a fixed basis, functional
 /// and grid. Implements [`ExchangeCorrelation`] for [`run_scf`].
@@ -391,7 +433,7 @@ impl XcIntegrator {
                         aos.extend(s.ao_offset..s.ao_offset + s.n_functions());
                     }
                 }
-                BlockSetup { shells: act, aos }
+                BlockSetup::new(act, aos)
             })
             .collect();
         // Cache AO values while the budget lasts.
@@ -466,101 +508,135 @@ impl XcIntegrator {
 
     /// [`XcIntegrator::evaluate_density`] and the time spent in each of its phases.
     fn evaluate_density_timed(&self, p: &Matrix) -> (XcEvaluation, XcPhaseTimes) {
+        self.evaluate_density_chunked(p, REDUCTION_CHUNK_BYTES)
+    }
+
+    /// [`XcIntegrator::evaluate_density_timed`] holding at most `chunk_bytes` of block
+    /// potentials at once (at least one block).
+    ///
+    /// Every sum is taken in block order, as a serial loop over all blocks would:
+    /// E_xc and Σ w ρ block by block, and each element V^xc_ab by adding the block
+    /// contributions in block order. The rows of V^xc are independent, so they are
+    /// summed in parallel; the result does not depend on `chunk_bytes` or the number
+    /// of threads.
+    fn evaluate_density_chunked(&self, p: &Matrix, chunk_bytes: usize) -> (XcEvaluation, XcPhaseTimes) {
         let n = self.basis.nao();
         assert_eq!((p.rows(), p.cols()), (n, n), "density matrix shape");
-        let gga = self.deriv >= 1;
-        let parallel_start = Instant::now();
-        let parts: Vec<_> = (0..self.blocks.len())
-            .into_par_iter()
-            .map(|ib| {
-                let setup = &self.blocks[ib];
-                let na = setup.aos.len();
-                if na == 0 {
-                    return None;
-                }
-                let mut bt = XcPhaseTimes::default();
-                let mut clock = Instant::now();
-                let mut lap = || {
-                    let now = Instant::now();
-                    let dt = (now - clock).as_secs_f64();
-                    clock = now;
-                    dt
-                };
-                let range = self.grid.blocks[ib].range.clone();
-                let computed;
-                let ao = match &self.cache[ib] {
-                    Some(a) => a,
-                    None => {
-                        computed = eval_ao_shells(&self.basis, &setup.shells, &self.grid.points[range.clone()], self.deriv);
-                        bt.recomputed_blocks = 1;
-                        &computed
-                    }
-                };
-                bt.ao_seconds = lap();
-                let w = &self.grid.weights[range];
-                let np = w.len();
-                let psub: Vec<f64> =
-                    setup.aos.iter().flat_map(|&a| setup.aos.iter().map(move |&b| p[(a, b)])).collect();
-                bt.gather_seconds = lap();
-                let (rho, grad, _) = density_on_points(ao, &psub, gga);
-                bt.density_seconds = lap();
-                let nel: f64 = rho.iter().zip(w).map(|(r, wg)| r * wg).sum();
-                let pd = xc_on_points(&self.functional, rho, grad);
-                let exc: f64 = pd.f.iter().zip(w).map(|(f, wg)| f * wg).sum();
-                bt.functional_seconds = lap();
-                // φ_ν(g) = w [½ v_ρ χ_ν + 2 v_σ ∇ρ·∇χ_ν]; V = M + Mᵀ with M_μν = Σ_g χ_μ φ_ν
-                // reproduces theory.typ eq:vxc.
-                let chi = ao.component(0);
-                let mut phi = vec![0.0; na * np];
-                for a in 0..na {
-                    let ph = &mut phi[a * np..(a + 1) * np];
-                    let ca = &chi[a * np..(a + 1) * np];
-                    for g in 0..np {
-                        ph[g] = 0.5 * w[g] * pd.v_rho[g] * ca[g];
-                    }
-                    if gga {
-                        for i in 0..3 {
-                            let d = &ao.component(D_X + i)[a * np..(a + 1) * np];
-                            for g in 0..np {
-                                ph[g] += 2.0 * w[g] * pd.v_sigma[g] * pd.grad_rho[g][i] * d[g];
-                            }
-                        }
-                    }
-                }
-                bt.phi_seconds = lap();
-                let v = ao_products(chi, &phi, na, np);
-                let mut vs = vec![0.0; na * na];
-                for a in 0..na {
-                    for b in 0..na {
-                        vs[a * na + b] = v[a * na + b] + v[b * na + a];
-                    }
-                }
-                bt.products_seconds = lap();
-                Some((exc, nel, vs, bt))
-            })
-            .collect();
         let mut times = XcPhaseTimes { evaluations: 1, ..XcPhaseTimes::default() };
-        times.parallel_wall_seconds = parallel_start.elapsed().as_secs_f64();
-        let reduction_start = Instant::now();
-        // Deterministic reduction in block order.
         let mut energy = 0.0;
         let mut electron_count = 0.0;
         let mut potential = Matrix::zeros(n, n);
-        for (ib, part) in parts.into_iter().enumerate() {
-            let Some((e, nel, vs, bt)) = part else { continue };
-            times.add(&bt);
-            energy += e;
-            electron_count += nel;
-            let aos = &self.blocks[ib].aos;
-            let na = aos.len();
-            for (ia, &a) in aos.iter().enumerate() {
-                for (jb, &b) in aos.iter().enumerate() {
-                    potential[(a, b)] += vs[ia * na + jb];
+        let nb = self.blocks.len();
+        let mut first = 0;
+        while first < nb {
+            let mut end = first;
+            let mut bytes = 0usize;
+            while end < nb {
+                let na = self.blocks[end].aos.len();
+                let b = na * na * std::mem::size_of::<f64>();
+                if end > first && bytes + b > chunk_bytes {
+                    break;
+                }
+                bytes += b;
+                end += 1;
+            }
+            let parallel_start = Instant::now();
+            let parts: Vec<Option<BlockPart>> = (first..end).into_par_iter().map(|ib| self.block_part(ib, p)).collect();
+            times.parallel_wall_seconds += parallel_start.elapsed().as_secs_f64();
+            let reduction_start = Instant::now();
+            for (e, nel, _, bt) in parts.iter().flatten() {
+                times.add(bt);
+                energy += e;
+                electron_count += nel;
+            }
+            let blocks = &self.blocks[first..end];
+            potential.as_mut_slice().par_chunks_mut(n.max(1)).enumerate().for_each(|(a, row)| {
+                for (setup, part) in blocks.iter().zip(&parts) {
+                    let Some((_, _, vs, _)) = part else { continue };
+                    let Ok(ia) = setup.aos.binary_search(&a) else { continue };
+                    let na = setup.aos.len();
+                    let vrow = &vs[ia * na..(ia + 1) * na];
+                    for &(pos, b0, len) in &setup.runs {
+                        for (o, v) in row[b0..b0 + len].iter_mut().zip(&vrow[pos..pos + len]) {
+                            *o += v;
+                        }
+                    }
+                }
+            });
+            times.reduction_seconds += reduction_start.elapsed().as_secs_f64();
+            first = end;
+        }
+        (XcEvaluation { energy, potential, electron_count }, times)
+    }
+
+    /// E_xc, Σ w ρ and the potential V[aos, aos] of block `ib` (`None` if no AO is
+    /// active on it).
+    fn block_part(&self, ib: usize, p: &Matrix) -> Option<BlockPart> {
+        let n = self.basis.nao();
+        let gga = self.deriv >= 1;
+        let setup = &self.blocks[ib];
+        let na = setup.aos.len();
+        if na == 0 {
+            return None;
+        }
+        let mut bt = XcPhaseTimes::default();
+        let mut clock = Instant::now();
+        let mut lap = || {
+            let now = Instant::now();
+            let dt = (now - clock).as_secs_f64();
+            clock = now;
+            dt
+        };
+        let range = self.grid.blocks[ib].range.clone();
+        let computed;
+        let ao = match &self.cache[ib] {
+            Some(a) => a,
+            None => {
+                computed = eval_ao_shells(&self.basis, &setup.shells, &self.grid.points[range.clone()], self.deriv);
+                bt.recomputed_blocks = 1;
+                &computed
+            }
+        };
+        bt.ao_seconds = lap();
+        let w = &self.grid.weights[range];
+        let np = w.len();
+        let psub = setup.gather(p.as_slice(), n);
+        bt.gather_seconds = lap();
+        let (rho, grad, _) = density_on_points(ao, &psub, gga);
+        bt.density_seconds = lap();
+        let nel: f64 = rho.iter().zip(w).map(|(r, wg)| r * wg).sum();
+        let pd = xc_on_points(&self.functional, rho, grad);
+        let exc: f64 = pd.f.iter().zip(w).map(|(f, wg)| f * wg).sum();
+        bt.functional_seconds = lap();
+        // φ_ν(g) = w [½ v_ρ χ_ν + 2 v_σ ∇ρ·∇χ_ν]; V = M + Mᵀ with M_μν = Σ_g χ_μ φ_ν
+        // reproduces theory.typ eq:vxc.
+        let chi = ao.component(0);
+        let mut phi = vec![0.0; na * np];
+        for a in 0..na {
+            let ph = &mut phi[a * np..(a + 1) * np];
+            let ca = &chi[a * np..(a + 1) * np];
+            for g in 0..np {
+                ph[g] = 0.5 * w[g] * pd.v_rho[g] * ca[g];
+            }
+            if gga {
+                for i in 0..3 {
+                    let d = &ao.component(D_X + i)[a * np..(a + 1) * np];
+                    for g in 0..np {
+                        ph[g] += 2.0 * w[g] * pd.v_sigma[g] * pd.grad_rho[g][i] * d[g];
+                    }
                 }
             }
         }
-        times.reduction_seconds = reduction_start.elapsed().as_secs_f64();
-        (XcEvaluation { energy, potential, electron_count }, times)
+        bt.phi_seconds = lap();
+        let v = ao_products(chi, &phi, na, np);
+        let mut vs = vec![0.0; na * na];
+        for a in 0..na {
+            for b in 0..na {
+                vs[a * na + b] = v[a * na + b] + v[b * na + a];
+            }
+        }
+        bt.products_seconds = lap();
+        Some((exc, nel, vs, bt))
     }
 }
 
@@ -706,6 +782,49 @@ mod tests {
         let phases = [t.ao_seconds, t.gather_seconds, t.density_seconds, t.functional_seconds, t.phi_seconds];
         assert!(phases.iter().chain([&t.products_seconds, &t.parallel_wall_seconds, &t.reduction_seconds]).all(|&s| s >= 0.0));
         assert!(t.ao_seconds > 0.0 && t.parallel_wall_seconds > 0.0);
+    }
+
+    #[test]
+    fn chunked_row_parallel_sum_matches_serial_block_order_bitwise() {
+        let mol = water();
+        let basis = Basis::from_name(&mol, "6-31g*").unwrap();
+        let p = run_rhf(&mol, &basis, &ScfOptions::default()).unwrap().density;
+        let n = basis.nao();
+        let xc = XcIntegrator::new(&mol, &basis, &Functional::b3lyp(), GridSettings::default()).unwrap();
+        let bits = |v: &[f64]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+        // Run-wise gather = element-wise gather.
+        let pr = &p;
+        for setup in &xc.blocks {
+            let elementwise: Vec<f64> = setup.aos.iter().flat_map(|&a| setup.aos.iter().map(move |&b| pr[(a, b)])).collect();
+            assert_eq!(bits(&setup.gather(p.as_slice(), n)), bits(&elementwise));
+        }
+        assert!(xc.blocks.iter().any(|s| s.runs.len() > 1), "no block with a gap in its AOs");
+        // Previous form: all block parts, then a serial sum in block order.
+        let (mut e_ref, mut n_ref, mut v_ref) = (0.0, 0.0, Matrix::zeros(n, n));
+        for ib in 0..xc.blocks.len() {
+            let Some((e, nel, vs, _)) = xc.block_part(ib, &p) else { continue };
+            e_ref += e;
+            n_ref += nel;
+            let aos = &xc.blocks[ib].aos;
+            for (ia, &a) in aos.iter().enumerate() {
+                for (jb, &b) in aos.iter().enumerate() {
+                    v_ref[(a, b)] += vs[ia * aos.len() + jb];
+                }
+            }
+        }
+        let check = |ev: &XcEvaluation, label: &str| {
+            assert_eq!(ev.energy.to_bits(), e_ref.to_bits(), "E_xc, {label}");
+            assert_eq!(ev.electron_count.to_bits(), n_ref.to_bits(), "N, {label}");
+            assert_eq!(bits(ev.potential.as_slice()), bits(v_ref.as_slice()), "V, {label}");
+        };
+        for threads in [1, 4] {
+            let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
+            for chunk in [0, 50_000, REDUCTION_CHUNK_BYTES] {
+                let (ev, _) = pool.install(|| xc.evaluate_density_chunked(&p, chunk));
+                check(&ev, &format!("{threads} threads, chunk {chunk} B"));
+            }
+        }
+        check(&xc.evaluate_density(&p), "default pool");
     }
 
     /// Previous row-axpy form of t (skips P_ab = 0).

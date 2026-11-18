@@ -8,8 +8,12 @@
 //! test instead of being skipped.
 //!
 //! Set QC_TEST_MOLECULES=name1,name2 (file stems) to run only some of them.
+//!
+//! RHF of every second molecule (the 1st, 3rd, ... in name order) runs with the
+//! integral-direct strategy (theory.typ sec:direct), the rest with the stored
+//! integrals, so that both are checked against PySCF without doubling the run time.
 
-use qc_rs::{Calculation, Molecule};
+use qc_rs::{Calculation, IntegralStrategy, Molecule};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -94,7 +98,7 @@ fn every_xyz_molecule_matches_pyscf() {
             failures.push(format!("{name}: reference entry without tests/molecules/{name}.xyz; {REGENERATE}"));
         }
     }
-    for (name, text) in &files {
+    for (index, (name, text)) in files.iter().enumerate() {
         if only.as_ref().is_some_and(|o| !o.contains(name)) {
             continue;
         }
@@ -120,7 +124,8 @@ fn every_xyz_molecule_matches_pyscf() {
             let start = Instant::now();
             // PySCF's "rhf" is our "hf"; the xc names are accepted as they are.
             let ours = if method == "rhf" { "hf" } else { method };
-            let res = match Calculation::new(&mol, ours, basis).and_then(|c| c.gradient()) {
+            let strategy = if method == "rhf" && index % 2 == 0 { IntegralStrategy::Direct } else { IntegralStrategy::Auto };
+            let res = match Calculation::new(&mol, ours, basis).and_then(|c| c.with_integral_strategy(strategy).gradient()) {
                 Ok(r) => r,
                 Err(e) => {
                     failures.push(format!("{case}: calculation failed: {e}"));
@@ -140,11 +145,15 @@ fn every_xyz_molecule_matches_pyscf() {
                 }
             }
             println!(
-                "{case:32} nao={nao:4} it={:3} E={:.8} |dE|={de:.2e} max|g|={gmax:.3} max|dg|={dg:.2e} ({:.1} s)",
+                "{case:32} nao={nao:4} {:?} it={:3} E={:.8} |dE|={de:.2e} max|g|={gmax:.3} max|dg|={dg:.2e} ({:.1} s)",
+                res.scf.integral_strategy,
                 res.scf.iterations,
                 res.energy,
                 start.elapsed().as_secs_f64()
             );
+            if strategy == IntegralStrategy::Direct && res.scf.integral_strategy != IntegralStrategy::Direct {
+                failures.push(format!("{case}: the direct strategy was not used"));
+            }
             if result["nao"].as_u64() != Some(nao as u64) {
                 failures.push(format!("{case}: nao {nao} vs {}", result["nao"]));
             }

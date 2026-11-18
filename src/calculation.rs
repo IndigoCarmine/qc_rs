@@ -26,7 +26,7 @@ use crate::grid::{GridSettings, MolecularGrid};
 use crate::linalg::Matrix;
 use crate::molecule::Molecule;
 use crate::optimize::{OptimizationStep, OptimizerSettings, bfgs_minimize};
-use crate::scf::{ScfOptions, ScfResult, run_scf};
+use crate::scf::{IntegralStrategy, ScfOptions, ScfResult, run_scf};
 
 /// SCF convergence (max |e| of the DIIS commutator) used for gradients and
 /// optimizations when the user's [`ScfOptions::error_tolerance`] is looser.
@@ -127,6 +127,14 @@ impl Calculation {
     /// tightened to [`GRADIENT_SCF_ERROR_TOLERANCE`] if it is looser.
     pub fn with_scf_options(mut self, options: ScfOptions) -> Self {
         self.scf_options = options;
+        self
+    }
+
+    /// Stored or integral-direct two-electron integrals (sets
+    /// [`ScfOptions::integral_strategy`]; the default is automatic). Gradients and
+    /// optimizations work with either.
+    pub fn with_integral_strategy(mut self, strategy: IntegralStrategy) -> Self {
+        self.scf_options.integral_strategy = strategy;
         self
     }
 

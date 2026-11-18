@@ -35,9 +35,76 @@ pub fn boys(nmax: usize, x: f64, out: &mut [f64]) {
     }
 }
 
+/// Grid spacing of the table of [`boys_tabulated`].
+const TABLE_STEP: f64 = 0.05;
+/// Number of Taylor terms of [`boys_tabulated`] (error < (Δ/2)^7/7! ≈ 1e-15 relative).
+const TAYLOR_TERMS: usize = 7;
+/// Highest order served by the table; larger `nmax` falls back to [`boys`].
+pub const TABULATED_NMAX: usize = 16;
+const TABLE_X_MAX: f64 = 35.0;
+
+/// F_n(x_i) for x_i = i Δ < 35 and n <= TABULATED_NMAX + TAYLOR_TERMS - 1, row-major by i.
+fn table() -> &'static [f64] {
+    static TABLE: std::sync::OnceLock<Vec<f64>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let width = TABULATED_NMAX + TAYLOR_TERMS;
+        let npts = (TABLE_X_MAX / TABLE_STEP) as usize + 2;
+        let mut t = vec![0.0; npts * width];
+        for (i, row) in t.chunks_mut(width).enumerate() {
+            boys(width - 1, i as f64 * TABLE_STEP, row);
+        }
+        t
+    })
+}
+
+/// Same as [`boys`] (to ~1e-15 relative), faster: below x = 35 the highest order is
+/// a 7-term Taylor expansion dF_n/dx = -F_{n+1} around the nearest point of a table
+/// with spacing 0.05 (built once with [`boys`]), the rest follow by the same downward
+/// recursion (theory.typ eq:boys-down). Used by the integral-direct J/K builds, which
+/// evaluate the Boys function in every SCF iteration.
+pub fn boys_tabulated(nmax: usize, x: f64, out: &mut [f64]) {
+    if nmax > TABULATED_NMAX || x >= TABLE_X_MAX {
+        boys(nmax, x, out);
+        return;
+    }
+    debug_assert!(out.len() > nmax);
+    debug_assert!(x >= 0.0);
+    let width = TABULATED_NMAX + TAYLOR_TERMS;
+    let i = (x / TABLE_STEP + 0.5) as usize;
+    let d = x - i as f64 * TABLE_STEP;
+    let row = &table()[i * width + nmax..i * width + nmax + TAYLOR_TERMS];
+    // Σ_k F_{n+k}(x_i) (-d)^k / k!, Horner form.
+    let mut f = row[TAYLOR_TERMS - 1];
+    for k in (1..TAYLOR_TERMS).rev() {
+        f = row[k - 1] - d * f / k as f64;
+    }
+    out[nmax] = f;
+    if nmax > 0 {
+        let ex = (-x).exp();
+        for n in (1..=nmax).rev() {
+            out[n - 1] = (2.0 * x * out[n] + ex) / (2 * n - 1) as f64;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tabulated_matches_series() {
+        let (mut a, mut b) = ([0.0; 17], [0.0; 17]);
+        for nmax in [0, 1, 4, 8, 16] {
+            for k in 0..=7200 {
+                let x = k as f64 * 0.00500037;
+                boys(nmax, x, &mut a);
+                boys_tabulated(nmax, x, &mut b);
+                for n in 0..=nmax {
+                    assert!((a[n] - b[n]).abs() <= 1e-14 * a[n], "n={n} x={x}: {} vs {}", a[n], b[n]);
+                }
+            }
+        }
+    }
 
     /// Composite Simpson quadrature of the defining integral.
     /// Uses Kahan summation so that rounding does not limit the reference.

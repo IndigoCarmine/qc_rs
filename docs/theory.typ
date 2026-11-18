@@ -170,6 +170,15 @@ $ F_n (x) = integral_0^1 t^(2n) e^(-x t^2) dif t $ <eq:boys>
 
 $x = 0$ では $F_n (0) = 1 slash (2n+1)$（@eq:boys-series はこれを含む）。
 
+直接法（@sec:direct）では SCF の反復ごとに Boys 関数を評価し直すので、$x < 35$ では表を使う。
+@eq:boys-series と @eq:boys-down で前もって $F_n (x_i)$（$x_i = i Delta$、$Delta = 0.05$）を作っておき、
+最寄りの格子点 $x_i$（$abs(delta) <= Delta slash 2$、$delta = x - x_i$）のまわりで
+$dif F_n slash dif x = -F_(n+1)$ を使って Taylor 展開する：
+
+$ F_(n_"max")(x) = sum_(k=0)^6 F_(n_"max" + k)(x_i) (-delta)^k / k! $ <eq:boys-taylor>
+
+打ち切り誤差は $(Delta slash 2)^7 slash 7! approx 10^(-15)$（相対）以下。残りの次数は @eq:boys-down で求める。
+
 == Hermite Coulomb 積分
 
 指数 $p$、変位 $vb(R) = (X, Y, Z)$ に対する補助積分 $R_(t u v)^n (p, vb(R))$：
@@ -253,7 +262,7 @@ $ theta = (a_(q q) - a_(p p)) / (2 a_(p q)), quad t = "sgn"(theta) / (abs(theta)
 
 == SCF 手順
 
-+ $S, T, V$、ERI、$X$ を計算する。
++ $S, T, V$、ERI（保存法の場合。直接法は @sec:direct）、$X$ を計算する。
 + 初期値：原子密度の重ね合わせ（@sec:sad）で $P$ を作る。前の構造の密度行列などが与えられていればそれを使う。
 + $P$ から $F$ を作り、エネルギーを計算する。
 + DIIS で $F$ を外挿する（下記）。
@@ -301,6 +310,58 @@ $ mat(B, -vb(1); -vb(1)^T, 0) vec(vb(c), lambda) = vec(vb(0), -1), quad F_"ext" 
 
 を解く（部分ピボット付き Gauss 消去）。保持数が 2 以上になったら外挿を使う。
 連立方程式が特異なら最古の組を捨ててやり直す。
+
+== 2電子積分の直接法 <sec:direct>
+
+独立な ERI をすべて保存する方法（保存法）はメモリが基底数の4乗に比例する（約 $N^4 slash 8$ 個の倍精度数）。
+直接法では積分を保存せず、反復ごとに殻四つ組 $(a b|c d)$ を計算して、その場で $J$ と $K$ に足し込む。
+@eq:eri-sym の独立な組（$a >= b$、$c >= d$、殻対の番号で $(a b) >= (c d)$）だけを回り、
+重み $w = 2^(-[a = b] - [c = d] - [(a b) = (c d)])$ をかけて、$mu in a, nu in b, lambda in c, sigma in d$ について
+
+$ & tilde(J)_(mu nu) += 2 w (mu nu|lambda sigma) P_(lambda sigma), quad
+    tilde(J)_(lambda sigma) += 2 w (mu nu|lambda sigma) P_(mu nu), \
+  & tilde(K)_(mu lambda) += w (mu nu|lambda sigma) P_(nu sigma), quad
+    tilde(K)_(nu lambda) += w (mu nu|lambda sigma) P_(mu sigma), \
+  & tilde(K)_(mu sigma) += w (mu nu|lambda sigma) P_(nu lambda), quad
+    tilde(K)_(nu sigma) += w (mu nu|lambda sigma) P_(mu lambda), \
+  & J = tilde(J) + tilde(J)^T, quad K = tilde(K) + tilde(K)^T $ <eq:jk-quartet>
+
+とする（$J, K$ は @eq:jk に一致する。8つの置換のうち互いに転置の関係にある項を最後の対称化でまとめ、
+同じ置換が重なる分を $w$ で割り引く）。範囲分離混成汎関数では $K$ の式の積分を
+$alpha (mu nu|lambda sigma) + beta (mu nu|lambda sigma)_omega$ に置き換えて $K^"x"$（@eq:cam-k）を作る。
+同じ原始関数の組の Hermite 展開係数 $E$ を2つの演算子で共有し、$R$ だけを2回求める。
+計算は規格化したデカルト成分で行い、密度を $P^"cart" = T^T P T$、結果を $J = T J^"cart" T^T$ で変換する
+（$T$ は @eq:sph-d の行列、デカルト d では単位行列）。
+
+*密度で重みづけた Schwarz 選別*：四つ組が $J$ と $K$ に寄与するときに掛かる密度のブロックは
+$P_(a b), P_(c d)$（$J$）と $P_(a c), P_(a d), P_(b c), P_(b d)$（$K$）なので、
+殻対の Schwarz 因子 $Q_(a b) = max_(mu in a, nu in b) sqrt((mu nu|mu nu))$ を使って
+
+$ Q_(a b) Q_(c d) max(norm(P_(a b)), norm(P_(c d)), norm(P_(a c)), norm(P_(a d)), norm(P_(b c)), norm(P_(b d))) < tau $ <eq:schwarz-dens>
+
+なら四つ組を省略する（$norm(dot)$ はブロック内の最大絶対値。$K$ が要らないときは $J$ の2つだけ。既定 $tau = 10^(-12)$）。
+@eq:schwarz により省略した項は1つあたり $tau$ 以下である。
+$erf(omega r) slash r$ と $"erfc"(omega r) slash r$ はどちらも正定値の核なので $(mu nu|mu nu)_omega <= (mu nu|mu nu)$ であり、
+Coulomb 積分の $Q$ は減衰した積分の上限にもなる。殻四つ組の中の原始関数の四つ組も、原始関数の積ごとの
+Schwarz 因子で同じ判定をし、閾値 $tau slash 10$ 未満なら省略する。
+
+*差分による Fock 行列の構築*：$J$ と $K$ は密度について線形なので、反復 $k$ では前回の密度との差から
+
+$ Delta P = P_k - P_(k-1), quad J[P_k] = J[P_(k-1)] + J[Delta P], quad K[P_k] = K[P_(k-1)] + K[Delta P] $ <eq:fock-incr>
+
+と作る。収束につれて $Delta P$ が小さくなり、@eq:schwarz-dens で $P$ を $Delta P$ に置き換えた判定で省略される四つ組が増える。
+全体から作るときの省略の誤差は毎回同じ $P$ の関数だが、差分で作ると各回の誤差が反復をまたいで足し合わさり、
+Fock 行列に $P$ だけでは決まらない雑音が乗る（閾値 $tau$ のままでは DIIS 誤差が $10^(-10)$ 前後で止まった）。そこで
+
+- 差分の構築では閾値を $tau dot "clamp"(e slash (10^6 tau), 1 slash 100, 1)$ にする（$e$ は前の反復の DIIS 誤差 @eq:diis-err）。
+  収束から遠いうちは雑音が問題にならないので $tau$ のまま安く作り、収束に近づくと $tau slash 100$ まで締める。
+- 差分による構築を10回続けたら全体を作り直す。
+- 前の反復の DIIS 誤差（@eq:diis-err）が $100 tau$ 未満になったら、以後は毎回全体から作る
+  （既定の $tau$ ではふつう起こらない。大きな $tau$ を指定したときに収束を妨げないため）。
+- 収束後のエネルギー（@sec:rhf の SCF 手順の最後）も差分ではなく全体から作る。
+
+保存法と直接法は `ScfOptions::integral_strategy` で選ぶ。既定（自動）では、保存するテンソル
+（範囲分離混成汎関数では2つ）の大きさが上限（既定 2 GiB）以下なら保存法、超えるなら直接法を使う。
 
 = 閉殻 Kohn–Sham DFT（RKS） <sec:rks>
 

@@ -2,6 +2,7 @@
 //! theory.typ sections 6–7.
 
 use crate::basis::Basis;
+use crate::direct::{DirectBuildStatistics, DirectJk};
 use crate::error::{QcError, Result};
 use crate::integrals::{EriTensor, ExchangeKernel, core_hamiltonian, overlap};
 use crate::linalg::{Matrix, solve, symmetric_eigen};
@@ -60,6 +61,25 @@ pub enum InitialGuess {
     CoreHamiltonian,
 }
 
+/// How the two-electron integrals enter the Fock matrix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum IntegralStrategy {
+    /// Compute all unique integrals once and keep them in memory (8-fold packed,
+    /// ~N⁴/8 doubles, twice that for a range-separated kernel; see
+    /// [`EriTensor::memory_bytes`]). Fastest for small molecules.
+    Stored,
+    /// Integral-direct: recompute the screened shell quartets in every iteration and
+    /// contract them at once into J and K (theory.typ eq:jk-quartet); memory O(N²).
+    Direct,
+    /// [`IntegralStrategy::Stored`] if the tensors fit within
+    /// [`ScfOptions::eri_memory_budget`], [`IntegralStrategy::Direct`] otherwise.
+    #[default]
+    Auto,
+}
+
+/// Default for [`ScfOptions::eri_memory_budget`]: 2 GiB.
+pub const DEFAULT_ERI_MEMORY_BUDGET: u64 = 2 << 30;
+
 /// SCF settings (defaults from theory.typ section 6.3).
 #[derive(Debug, Clone)]
 pub struct ScfOptions {
@@ -80,6 +100,23 @@ pub struct ScfOptions {
     pub initial_density: Option<Matrix>,
     /// Guess used when `initial_density` is `None`.
     pub initial_guess: InitialGuess,
+    /// Stored or direct two-electron integrals (default: automatic).
+    pub integral_strategy: IntegralStrategy,
+    /// Largest total size (bytes) of the stored integral tensors for which
+    /// [`IntegralStrategy::Auto`] chooses the stored strategy.
+    pub eri_memory_budget: u64,
+    /// Direct strategy: shell quartets whose density-weighted Schwarz bound
+    /// (theory.typ eq:schwarz-dens) is below this are skipped (ΔP builds use down to
+    /// [`INCREMENTAL_THRESHOLD_FACTOR`] times this). The energy error is of the order
+    /// of 10 times the threshold.
+    pub direct_threshold: f64,
+    /// Direct strategy: build J and K from the density change ΔP and add them to the
+    /// previous ones (theory.typ eq:fock-incr), as long as the DIIS error is at least
+    /// [`INCREMENTAL_MIN_ERROR_FACTOR`] times `direct_threshold`.
+    pub incremental_fock: bool,
+    /// Direct strategy: a full build after this many incremental ones (also the first
+    /// build and the one for the final energy are full).
+    pub full_rebuild_interval: usize,
 }
 
 impl Default for ScfOptions {
@@ -93,6 +130,11 @@ impl Default for ScfOptions {
             linear_dependence_threshold: 1e-8,
             initial_density: None,
             initial_guess: InitialGuess::default(),
+            integral_strategy: IntegralStrategy::default(),
+            eri_memory_budget: DEFAULT_ERI_MEMORY_BUDGET,
+            direct_threshold: 1e-12,
+            incremental_fock: true,
+            full_rebuild_interval: 10,
         }
     }
 }
@@ -145,6 +187,12 @@ pub struct ScfResult {
     pub final_delta_e: f64,
     /// max |e| of the DIIS error at convergence.
     pub final_error: f64,
+    /// The integral strategy used ([`IntegralStrategy::Stored`] or
+    /// [`IntegralStrategy::Direct`], never `Auto`).
+    pub integral_strategy: IntegralStrategy,
+    /// Direct strategy: one entry per J/K build (the last one is the full build for the
+    /// final energy). Empty for the stored strategy.
+    pub direct_builds: Vec<DirectBuildStatistics>,
 }
 
 /// Closed-shell Hartree–Fock energy.
@@ -152,32 +200,125 @@ pub fn run_rhf(mol: &Molecule, basis: &Basis, options: &ScfOptions) -> Result<Sc
     run_scf(mol, basis, &mut HartreeFock, options)
 }
 
+/// Smallest screening threshold of the ΔP builds relative to
+/// [`ScfOptions::direct_threshold`] τ (theory.typ eq:fock-incr): a ΔP build uses
+/// τ · clamp(e / ([`INCREMENTAL_ERROR_RATIO`] τ), this, 1) with e the DIIS error of the
+/// previous iteration. Each build may leave out terms up to the threshold, and in the
+/// ΔP builds these errors add up from one iteration to the next instead of being the
+/// same function of P every time: with τ = 1e-12 throughout, the Fock matrix carried
+/// noise that kept DIIS at ~2e-10, above the 1e-10 used for gradients. Far from
+/// convergence the noise does not matter and the full τ keeps the ΔP builds cheap.
+pub const INCREMENTAL_THRESHOLD_FACTOR: f64 = 0.01;
+
+/// See [`INCREMENTAL_THRESHOLD_FACTOR`].
+pub const INCREMENTAL_ERROR_RATIO: f64 = 1e6;
+
+/// ΔP builds are used only while the DIIS error (eq:diis-err) of the previous
+/// iteration is at least this multiple of [`ScfOptions::direct_threshold`]; below,
+/// every build is full. With the default threshold 1e-12 this never triggers for the
+/// usual convergence targets; for a loose threshold it keeps the SCF converging.
+pub const INCREMENTAL_MIN_ERROR_FACTOR: f64 = 100.0;
+
+/// Integral-direct J/K with the state of the incremental build (theory.typ eq:fock-incr).
+struct DirectState {
+    jk: DirectJk,
+    /// Screening threshold of the full builds.
+    threshold: f64,
+    incremental: bool,
+    interval: usize,
+    /// Density, J and K of the last build.
+    last: Option<(Matrix, Matrix, Option<Matrix>)>,
+    /// Incremental builds since the last full one.
+    since_full: usize,
+    /// DIIS error (eq:diis-err) of the previous iteration.
+    diis_error: f64,
+    stats: Vec<DirectBuildStatistics>,
+}
+
+impl DirectState {
+    /// J and K for density `p` (K in the convention of [`DirectJk::coulomb_exchange`]).
+    /// Incremental unless `full`, the first build, or `interval` incremental builds
+    /// have been done since the last full one.
+    fn build(&mut self, p: &Matrix, want_k: bool, full: bool) -> (Matrix, Option<Matrix>) {
+        let use_delta = self.incremental && !full && self.since_full < self.interval;
+        let (j, k) = match (&self.last, use_delta) {
+            (Some((p_old, j_old, k_old)), true) => {
+                // theory.typ eq:fock-incr
+                let dp = p - p_old;
+                // Tighter as the SCF converges: the noise of the ΔP builds (~100 τ_ΔP)
+                // stays a hundredth of the DIIS error.
+                let scale = (self.diis_error / (INCREMENTAL_ERROR_RATIO * self.threshold))
+                    .clamp(INCREMENTAL_THRESHOLD_FACTOR, 1.0);
+                let tau = self.threshold * scale;
+                let (dj, dk, mut st) = self.jk.coulomb_exchange_screened(&dp, want_k, tau);
+                st.incremental = true;
+                self.stats.push(st);
+                self.since_full += 1;
+                let k = match (k_old, dk) {
+                    (Some(k_old), Some(dk)) => Some(k_old + &dk),
+                    _ => None,
+                };
+                (j_old + &dj, k)
+            }
+            _ => {
+                let (j, k, st) = self.jk.coulomb_exchange(p, want_k);
+                self.stats.push(st);
+                self.since_full = 0;
+                (j, k)
+            }
+        };
+        self.last = Some((p.clone(), j.clone(), k.clone()));
+        (j, k)
+    }
+}
+
+/// Where J and K come from.
+enum TwoElectron {
+    Stored {
+        eri: EriTensor,
+        /// α (μν|λσ) + β (μν|λσ)_ω for a range-separated kernel (theory.typ eq:cam-k).
+        exchange_eri: Option<EriTensor>,
+    },
+    Direct(Box<DirectState>),
+}
+
 /// Integrals and derived matrices shared by all SCF iterations.
 struct ScfSystem<'a> {
     h: Matrix,
     s: Matrix,
     x: Matrix,
-    eri: EriTensor,
+    two: TwoElectron,
     /// Exact-exchange kernel of `xc`.
     kernel: ExchangeKernel,
-    /// α (μν|λσ) + β (μν|λσ)_ω for a range-separated kernel (theory.typ eq:cam-k).
-    exchange_eri: Option<EriTensor>,
     e_nuc: f64,
     xc: &'a mut dyn ExchangeCorrelation,
 }
 
 impl ScfSystem<'_> {
     /// Fock matrix and energy components for density `p`. theory.typ eq:fock-rks,
-    /// eq:e-rks, eq:cam-fock
-    fn fock(&mut self, p: &Matrix) -> Result<(Matrix, EnergyComponents)> {
-        let (j, k, a_hf) = match &self.exchange_eri {
+    /// eq:e-rks, eq:cam-fock. `full` forbids an incremental direct build.
+    fn fock(&mut self, p: &Matrix, full: bool) -> Result<(Matrix, EnergyComponents)> {
+        let (j, k, a_hf) = match &mut self.two {
             // K^x from the combined tensor (theory.typ eq:cam-k), already scaled.
-            Some(x) => (self.eri.coulomb_exchange(p, false).0, Some(x.exchange(p)), 1.0),
+            TwoElectron::Stored { eri, exchange_eri: Some(x) } => {
+                (eri.coulomb_exchange(p, false).0, Some(x.exchange(p)), 1.0)
+            }
             // K^x = a_HF K (theory.typ eq:fock-rks).
-            None => {
+            TwoElectron::Stored { eri, exchange_eri: None } => {
                 let a_hf = self.kernel.alpha;
-                let (j, k) = self.eri.coulomb_exchange(p, a_hf != 0.0);
+                let (j, k) = eri.coulomb_exchange(p, a_hf != 0.0);
                 (j, k, a_hf)
+            }
+            // Same convention: K^x for a range-separated kernel, otherwise K.
+            TwoElectron::Direct(d) => {
+                if self.kernel.is_range_separated() {
+                    let (j, k) = d.build(p, true, full);
+                    (j, k, 1.0)
+                } else {
+                    let a_hf = self.kernel.alpha;
+                    let (j, k) = d.build(p, a_hf != 0.0, full);
+                    (j, k, a_hf)
+                }
             }
         };
         let mut f = &self.h + &j;
@@ -335,17 +476,31 @@ pub fn run_scf(
     }
     let u = &se.vectors;
     let x = Matrix::from_fn(n, n, |i, j| (0..n).map(|k| u[(i, k)] * u[(j, k)] / se.values[k].sqrt()).sum());
-    let eri = EriTensor::compute(basis, options.schwarz_threshold);
     let kernel = xc.exchange_kernel();
-    // A second tensor only for a range-separated kernel (theory.typ eq:cam-k).
-    let exchange_eri = eri.exchange_tensor(basis, kernel, options.schwarz_threshold);
+    let two = match resolve_strategy(options, n, kernel) {
+        IntegralStrategy::Direct => TwoElectron::Direct(Box::new(DirectState {
+            jk: DirectJk::new(basis, kernel, options.direct_threshold),
+            threshold: options.direct_threshold,
+            incremental: options.incremental_fock,
+            interval: options.full_rebuild_interval,
+            last: None,
+            since_full: 0,
+            diis_error: f64::INFINITY,
+            stats: Vec::new(),
+        })),
+        _ => {
+            let eri = EriTensor::compute(basis, options.schwarz_threshold);
+            // A second tensor only for a range-separated kernel (theory.typ eq:cam-k).
+            let exchange_eri = eri.exchange_tensor(basis, kernel, options.schwarz_threshold);
+            TwoElectron::Stored { eri, exchange_eri }
+        }
+    };
     let mut sys = ScfSystem {
         h: core_hamiltonian(basis, mol),
         s,
         x,
-        eri,
+        two,
         kernel,
-        exchange_eri,
         e_nuc: mol.nuclear_repulsion(),
         xc,
     };
@@ -376,7 +531,13 @@ pub fn run_scf(
     let (mut last_de, mut last_err) = (f64::INFINITY, f64::INFINITY);
     for iter in 1..=options.max_iterations {
         // Step 3: Fock matrix and energy.
-        let (f, comps) = sys.fock(&p)?;
+        // Close to convergence the direct strategy builds the full J and K again
+        // (theory.typ eq:fock-incr), so that the noise of the ΔP builds cannot stall DIIS.
+        let full = last_err < INCREMENTAL_MIN_ERROR_FACTOR * options.direct_threshold;
+        if let TwoElectron::Direct(d) = &mut sys.two {
+            d.diis_error = last_err;
+        }
+        let (f, comps) = sys.fock(&p, full)?;
         let e = comps.total();
         if !e.is_finite() {
             return Err(QcError::ScfNotConverged { iterations: iter, delta_e: f64::NAN, max_error: f64::NAN });
@@ -414,7 +575,13 @@ pub fn run_scf(
 fn finish(sys: &mut ScfSystem, f: &Matrix, nocc: usize, iterations: usize, de: f64, err: f64) -> Result<ScfResult> {
     let (eps, c) = sys.diagonalize(f)?;
     let p = density(&c, nocc);
-    let (_, comps) = sys.fock(&p)?;
+    // A full build, so that the energy carries no error accumulated by the
+    // incremental builds (theory.typ eq:fock-incr).
+    let (_, comps) = sys.fock(&p, true)?;
+    let (integral_strategy, direct_builds) = match &mut sys.two {
+        TwoElectron::Stored { .. } => (IntegralStrategy::Stored, Vec::new()),
+        TwoElectron::Direct(d) => (IntegralStrategy::Direct, std::mem::take(&mut d.stats)),
+    };
     Ok(ScfResult {
         energy: comps.total(),
         components: comps,
@@ -425,7 +592,26 @@ fn finish(sys: &mut ScfSystem, f: &Matrix, nocc: usize, iterations: usize, de: f
         iterations,
         final_delta_e: de,
         final_error: err,
+        integral_strategy,
+        direct_builds,
     })
+}
+
+/// The strategy `options` asks for, with [`IntegralStrategy::Auto`] resolved: stored
+/// if the tensor(s) for `nao` functions (two for a range-separated `kernel`) fit
+/// within [`ScfOptions::eri_memory_budget`].
+pub fn resolve_strategy(options: &ScfOptions, nao: usize, kernel: ExchangeKernel) -> IntegralStrategy {
+    match options.integral_strategy {
+        IntegralStrategy::Auto => {
+            let tensors = if kernel.is_range_separated() { 2 } else { 1 };
+            if EriTensor::memory_bytes(nao).saturating_mul(tensors) <= options.eri_memory_budget {
+                IntegralStrategy::Stored
+            } else {
+                IntegralStrategy::Direct
+            }
+        }
+        s => s,
+    }
 }
 
 /// Pulay DIIS: solve theory.typ eq:diis, dropping the oldest pair while singular. UNCHECKED(Pulay1980)

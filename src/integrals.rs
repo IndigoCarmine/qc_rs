@@ -142,25 +142,25 @@ pub fn pair_index(i: usize, j: usize) -> usize {
 
 /// Hermite data of one primitive pair inside a shell pair: E_tuv for every
 /// Cartesian component pair, already multiplied by d̃_a d̃_b c_a c_b.
-struct PrimPairData {
-    p: f64,
-    center: [f64; 3],
+pub(crate) struct PrimPairData {
+    pub(crate) p: f64,
+    pub(crate) center: [f64; 3],
     /// Row-major `[tuv][component pair]`.
-    e: Vec<f64>,
+    pub(crate) e: Vec<f64>,
 }
 
 /// A shell pair (a >= b) prepared for ERI evaluation.
-struct ShellPairData {
-    sa: usize,
-    sb: usize,
-    lab: usize,
-    ncomp: usize,
-    tuv: Vec<[usize; 3]>,
-    prims: Vec<PrimPairData>,
+pub(crate) struct ShellPairData {
+    pub(crate) sa: usize,
+    pub(crate) sb: usize,
+    pub(crate) lab: usize,
+    pub(crate) ncomp: usize,
+    pub(crate) tuv: Vec<[usize; 3]>,
+    pub(crate) prims: Vec<PrimPairData>,
 }
 
 impl ShellPairData {
-    fn new(shells: &[Shell], sa: usize, sb: usize) -> Self {
+    pub(crate) fn new(shells: &[Shell], sa: usize, sb: usize) -> Self {
         let (a, b) = (&shells[sa], &shells[sb]);
         let (ca, na) = components(a);
         let (cb, nb) = components(b);
@@ -352,6 +352,14 @@ pub struct EriTensor {
 }
 
 impl EriTensor {
+    /// Bytes of one stored tensor for `nao` basis functions: one `f64` per 8-fold
+    /// permutation class (theory.typ eq:eri-sym), n_pair (n_pair + 1)/2 with
+    /// n_pair = nao (nao + 1)/2. A range-separated exchange kernel needs two tensors.
+    pub fn memory_bytes(nao: usize) -> u64 {
+        let npair = (nao as u64) * (nao as u64 + 1) / 2;
+        npair * (npair + 1) / 2 * std::mem::size_of::<f64>() as u64
+    }
+
     /// Computes all unique ERIs, skipping shell quartets whose Schwarz bound
     /// (theory.typ eq:schwarz) is below `schwarz_threshold`. Parallelized with rayon.
     pub fn compute(basis: &Basis, schwarz_threshold: f64) -> Self {

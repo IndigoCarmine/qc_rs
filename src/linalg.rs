@@ -1,7 +1,47 @@
-//! Small dense linear algebra: row-major matrix, Jacobi symmetric eigensolver, linear solve.
+//! Small dense linear algebra: row-major matrix, symmetric eigensolver, linear solve.
+//!
+//! The symmetric eigendecomposition and the matrix product are delegated to the
+//! `faer` crate (pure Rust, MIT). [`Matrix`] stays the crate's own row-major type and
+//! is only viewed as a faer matrix inside this module. The small linear solve (DIIS,
+//! BFGS; N < 100) stays hand-written: it is as fast at these sizes and carries the
+//! relative-pivot singularity test the callers rely on. The cyclic Jacobi solver of
+//! theory.typ eq:jacobi is kept as a test-only reference implementation.
 
 use crate::error::{QcError, Result};
 use std::ops::{Add, Index, IndexMut, Mul, Sub};
+
+/// Smallest dimension at which [`Matrix::matmul`] uses the rayon thread pool.
+const PARALLEL_MATMUL_MIN_DIM: usize = 128;
+
+/// Clears the upper halves of the AVX registers after a call into faer.
+///
+/// faer picks AVX2/AVX-512 kernels at run time and its eigensolver can return with
+/// the upper register halves still in use. This crate is compiled for baseline
+/// x86-64 (SSE2), and SSE code that runs while those halves are "dirty" pays a large
+/// penalty on current CPUs: the J/K build after each Fock diagonalization measured
+/// 2.2 times slower (benzene/6-31G*, Zen 5) without this call. No-op on other
+/// architectures and on x86 CPUs without AVX.
+#[inline]
+fn clear_avx_upper() {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        #[cfg(target_arch = "x86")]
+        use std::arch::x86::_mm256_zeroupper;
+        #[cfg(target_arch = "x86_64")]
+        use std::arch::x86_64::_mm256_zeroupper;
+
+        #[target_feature(enable = "avx")]
+        fn zero_upper() {
+            _mm256_zeroupper();
+        }
+        if std::is_x86_feature_detected!("avx") {
+            // SAFETY: AVX support was just checked at run time; VZEROUPPER only
+            // zeroes bits 128 and up of the vector registers, which baseline (SSE2)
+            // code never reads.
+            unsafe { zero_upper() }
+        }
+    }
+}
 
 /// Dense row-major matrix of `f64`.
 #[derive(Debug, Clone, PartialEq)]
@@ -70,23 +110,28 @@ impl Matrix {
         Matrix::from_fn(self.cols, self.rows, |i, j| self[(j, i)])
     }
 
-    /// Matrix product `self * other`.
+    /// Matrix product `self * other` (faer).
     pub fn matmul(&self, other: &Matrix) -> Matrix {
         assert_eq!(self.cols, other.rows, "matmul shape mismatch");
         let mut out = Matrix::zeros(self.rows, other.cols);
-        for i in 0..self.rows {
-            let orow = &mut out.data[i * other.cols..(i + 1) * other.cols];
-            for k in 0..self.cols {
-                let a = self.data[i * self.cols + k];
-                if a == 0.0 {
-                    continue;
-                }
-                let brow = &other.data[k * other.cols..(k + 1) * other.cols];
-                for (o, b) in orow.iter_mut().zip(brow) {
-                    *o += a * b;
-                }
-            }
+        if out.data.is_empty() || self.cols == 0 {
+            return out;
         }
+        // Threads only pay off for larger products; below that they cost more than they save.
+        let par = if self.rows.max(self.cols).max(other.cols) >= PARALLEL_MATMUL_MIN_DIM {
+            faer::Par::rayon(0)
+        } else {
+            faer::Par::Seq
+        };
+        faer::linalg::matmul::matmul(
+            faer::MatMut::from_row_major_slice_mut(&mut out.data, self.rows, other.cols),
+            faer::Accum::Replace,
+            faer::MatRef::from_row_major_slice(&self.data, self.rows, self.cols),
+            faer::MatRef::from_row_major_slice(&other.data, other.rows, other.cols),
+            1.0,
+            par,
+        );
+        clear_avx_upper();
         out
     }
 
@@ -152,8 +197,34 @@ pub struct SymmetricEigen {
     pub vectors: Matrix,
 }
 
-/// Diagonalizes a symmetric matrix with the cyclic Jacobi method. theory.typ eq:jacobi
+/// Diagonalizes a symmetric matrix (faer's self-adjoint eigensolver: tridiagonalization
+/// followed by divide and conquer). Eigenvalues are returned in ascending order.
 pub fn symmetric_eigen(a: &Matrix) -> Result<SymmetricEigen> {
+    if a.rows != a.cols {
+        return Err(QcError::InvalidInput("eigen: matrix is not square".into()));
+    }
+    let n = a.rows;
+    if a.data.iter().any(|x| !x.is_finite()) {
+        return Err(QcError::InvalidInput("eigen: non-finite matrix".into()));
+    }
+    // Work on the exactly symmetric part.
+    let m = faer::Mat::<f64>::from_fn(n, n, |i, j| 0.5 * (a[(i, j)] + a[(j, i)]));
+    let eig = m.self_adjoint_eigen(faer::Side::Lower);
+    clear_avx_upper();
+    let eig = eig.map_err(|_| QcError::EigenNotConverged)?;
+    let (s, u) = (eig.S().column_vector(), eig.U());
+    // Do not rely on the ordering faer happens to return.
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&i, &j| s[i].total_cmp(&s[j]));
+    let values = order.iter().map(|&i| s[i]).collect();
+    let vectors = Matrix::from_fn(n, n, |r, c| u[(r, order[c])]);
+    Ok(SymmetricEigen { values, vectors })
+}
+
+/// Reference implementation: cyclic Jacobi method of theory.typ eq:jacobi. Used only to
+/// cross-check [`symmetric_eigen`] in the tests.
+#[cfg(test)]
+fn jacobi_eigen(a: &Matrix) -> Result<SymmetricEigen> {
     if a.rows != a.cols {
         return Err(QcError::InvalidInput("eigen: matrix is not square".into()));
     }
@@ -327,6 +398,40 @@ mod tests {
             // Trace preserved
             let tr: f64 = (0..n).map(|i| a[(i, i)]).sum();
             assert!((tr - e.values.iter().sum::<f64>()).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn faer_matches_jacobi_reference() {
+        for n in [1, 2, 7, 40, 150] {
+            let a = test_matrix(n);
+            let e = symmetric_eigen(&a).unwrap();
+            let j = jacobi_eigen(&a).unwrap();
+            let scale = a.max_abs().max(1.0) * n as f64;
+            for (x, y) in e.values.iter().zip(&j.values) {
+                assert!((x - y).abs() < 1e-13 * scale, "n={n}: {x} vs {y}");
+            }
+            // Same invariant subspaces: both reconstruct A.
+            for eig in [&e, &j] {
+                let v = &eig.vectors;
+                let d = Matrix::from_fn(n, n, |r, c| v[(r, c)] * eig.values[c]);
+                assert!((&d.matmul(&v.transpose()) - &a).max_abs() < 1e-12 * scale);
+            }
+        }
+    }
+
+    #[test]
+    fn matmul_matches_naive_product() {
+        for (r, k, c) in [(1, 1, 1), (3, 5, 2), (40, 17, 33), (130, 140, 129)] {
+            let a = Matrix::from_fn(r, k, |i, j| ((i * 31 + j * 17) % 13) as f64 - 6.0);
+            let b = Matrix::from_fn(k, c, |i, j| ((i * 7 + j * 29) % 11) as f64 * 0.25 - 1.0);
+            let p = a.matmul(&b);
+            for i in 0..r {
+                for j in 0..c {
+                    let x: f64 = (0..k).map(|t| a[(i, t)] * b[(t, j)]).sum();
+                    assert!((p[(i, j)] - x).abs() < 1e-10);
+                }
+            }
         }
     }
 

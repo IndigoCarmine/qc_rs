@@ -1,7 +1,7 @@
 # qc_rs
 
 Gauss 基底による閉殻 Hartree–Fock（RHF）と Kohn–Sham DFT（RKS）の Rust 実装です。
-1点エネルギー・解析的エネルギー勾配・構造最適化ができます。依存クレートは `rayon`（並列化）だけです。
+1点エネルギー・解析的エネルギー勾配・構造最適化ができます。依存クレートは `rayon`（並列化）と `faer`（対称行列の固有値分解と行列積）です。
 数式はすべて `docs/theory.typ`（理論仕様書）に従い、コード中のコメントは仕様書の式ラベル（`eq:grad` など）を参照しています。
 
 純 Rust で書かれており、C/Fortran のライブラリやシステムの BLAS を必要としません。
@@ -109,7 +109,7 @@ PySCF に依存しない検査として、エネルギーの中心差分（h = 1
 
 ## 支えているプロジェクト
 
-qc_rs 自体が実行時に使うのは Rust の標準ライブラリと rayon だけですが、開発と検証は次のプロジェクトに支えられています。
+qc_rs 自体が実行時に使うのは Rust の標準ライブラリと rayon、faer だけですが、開発と検証は次のプロジェクトに支えられています。
 
 | プロジェクト | 何に使っているか |
 |---|---|
@@ -119,6 +119,7 @@ qc_rs 自体が実行時に使うのは Rust の標準ライブラリと rayon �
 | [Basis Set Exchange](https://www.basissetexchange.org/) | 基底関数データ（`data/basis/*.gbs`）の入手元 |
 | [Typst](https://typst.app/) | 理論仕様書 `docs/theory.typ` の組版 |
 | [Rust](https://www.rust-lang.org/) / [rayon](https://github.com/rayon-rs/rayon) | 実装言語と、2電子積分・数値積分の並列化 |
+| [faer](https://codeberg.org/sarah-quinones/faer) | 対称行列の固有値分解と行列積（純 Rust、MIT）。連立方程式と、検証用の Jacobi 法は自前のまま |
 | [serde_json](https://github.com/serde-rs/json) | テストで参照値の JSON を読む（開発時のみの依存） |
 
 ## 背景となる論文

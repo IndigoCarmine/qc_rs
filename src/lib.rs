@@ -43,6 +43,7 @@ pub mod molecule;
 pub mod optimize;
 pub mod properties;
 pub mod scf;
+pub mod thermo;
 pub mod vibration;
 
 pub use basis::{Basis, BasisOptions, BasisSetDefinition};
@@ -60,5 +61,6 @@ pub use optimize::{OptimizationResult, OptimizationStep, OptimizerSettings, bfgs
 pub use linalg::Matrix;
 pub use molecule::{Atom, Molecule, Unit};
 pub use properties::dipole_moment;
+pub use thermo::{ThermoContribution, ThermoSettings, Thermochemistry, thermochemistry};
 pub use vibration::{HarmonicAnalysis, harmonic_analysis, standard_atomic_mass};
 pub use scf::{EnergyComponents, ExchangeCorrelation, HartreeFock, InitialGuess, IntegralStrategy, ScfOptions, ScfResult, XcTerm, run_rhf, run_scf};

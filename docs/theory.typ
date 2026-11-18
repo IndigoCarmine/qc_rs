@@ -1095,4 +1095,16 @@ $ U = E_"el" + E_"t" + E_"r" + E_"v" + E_"e", quad
   S = S_"t" + S_"r" + S_"v" + S_"e", quad
   G = H - T S $ <eq:thermo-total>
 
-あわせて $E_"el" + E_"ZPE"$ と $C_"v" = C_"v,t" + C_"v,r" + C_"v,v"$ を示す。
+あわせて $E_"el" + E_"ZPE"$ と $C_"v" = C_"v,t" + C_"v,r" + C_"v,v"$、$C_"p" = C_"v" + k_B$（理想気体）を示す。
+
+*実装上の注意。* 振動の $Theta_k$ は波数から $Theta_k = tilde(nu)_k (E_h slash k_B) slash (E_h slash h c)$ で求める（@eq:freq の定数）。
+$tilde(nu)_k <= 0$ の振動（虚数と、ちょうど 0 のもの）は和に入れず、その数を利用者に示す。
+$x_k$ が大きいときに桁あふれしないよう、$C_"v,v"$ の項は $x_k^2 e^(-x_k) slash (1 - e^(-x_k))^2$ と、
+$ln(1 - e^(-x_k))$ と $e^(x_k) - 1$ は $"ln1p"$、$"expm1"$ で計算する（式は同じ）。
+振動の数は $3 N_"atom" - n_"tr"$（@eq:tr-vectors）でなければならない。
+
+*PySCF との比較。* PySCF の `thermo.thermo` の出力から $k_B T = H - U$ を逆算すると、$E_h slash k_B$ が
+CODATA 2018 の値より相対 $3.3 times 10^(-7)$ 大きい $315775.129 thin "K"$ になる（CODATA 2014 の値 $315775.13 thin "K"$ に近い。PySCF のコードは読まず、出力した数値から求めた）。
+そのまま比べると $k_B T$ に比例する量が相対 $3$〜$4 times 10^(-7)$ ずれる。上の式の温度依存はすべて $k_B T$ を通してだけ入るので、
+比較テストでは $k_B T$ が PySCF と等しくなる温度 $T' = T (H - U)_"PySCF" slash (k_B T)$ で計算し、
+エネルギー（$E$、$H$、$G$）はそのまま、$S$ と $C_"v"$ は $T' S$ と $T S_"PySCF"$ のように温度を掛けて $E_h$ で比べる。

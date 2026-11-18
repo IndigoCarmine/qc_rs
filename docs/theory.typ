@@ -250,15 +250,25 @@ $ X = U s^(-1 slash 2) U^T $ <eq:orth>
 
 を作り、$F' = X^T F X$ を対角化して $F' C' = C' epsilon$、$C = X C'$。
 固有値は昇順に並べ、下から $N_"occ"$ 個を占有する。$s$ の最小固有値が $10^(-8)$ 未満ならエラーとする
-（線形従属）。対称行列の固有値分解は巡回 Jacobi 法で実装する：
-非対角要素 $a_(p q)$ を消す回転角は
+（線形従属）。対称行列 $A$（$n times n$）の固有値分解は、Householder 法による三重対角化と
+陰的シフト付き QL 法で実装する。まず $k = 0, dots, n - 3$ の順に、第 $k$ 列の対角より下の部分
+$x = (a_(k+1, k), dots, a_(n-1, k))^T$ を第1成分だけに縮める鏡映
 
-$ theta = (a_(q q) - a_(p p)) / (2 a_(p q)), quad t = "sgn"(theta) / (abs(theta) + sqrt(theta^2 + 1)), quad
-  c = 1 / sqrt(t^2 + 1), quad s = t c $ <eq:jacobi>
+$ P_k = I - beta v v^T, quad v = x - alpha e_1, quad alpha = -"sgn"(x_1) norm(x), quad
+  beta = 2 / (v^T v) $ <eq:householder>
 
-で、非対角要素の2乗和が十分小さく（全体の $10^(-22)$ 倍以下）なるまで掃引を繰り返し、
-条件を満たしたあとさらに1回掃引する（Jacobi 法は2次収束なので、これで丸め誤差の水準に達する）。
-回転は $A <- G^T A G$（$G_(p p) = G_(q q) = c$、$G_(p q) = s$、$G_(q p) = -s$）、$"sgn"(0) = +1$ とする。
+（添字 $k+1, dots, n-1$ にだけ作用し、$"sgn"(0) = +1$。$x$ の第2成分以降がすべて 0 なら $P_k = I$）
+を $A <- P_k A P_k$ と施し、三重対角行列 $T = Q^T A Q$（$Q = P_0 P_1 dots.c P_(n-3)$）を得る。
+$T$ の対角を $d_i$、副対角を $e_i$（$i$ と $i+1$ の結合）とする。次に、$abs(e_m) <= epsilon_"mach" (abs(d_m) + abs(d_(m+1)))$
+となる $e_m$ を 0 とみなして $T$ を分割し、分割されていない先頭ブロック $[l, m]$ に
+シフト
+
+$ delta = (d_(l+1) - d_l) / (2 e_l), quad
+  mu = d_l - e_l / (delta + "sgn"(delta) sqrt(delta^2 + 1)) $ <eq:ql-shift>
+
+（先頭の $2 times 2$ ブロックの固有値のうち $d_l$ に近いほう、$"sgn"(0) = +1$）で陰的 QL 掃引（平面回転の列）を繰り返す。
+各回転を $Q$ に右から掛けていき、すべての $e$ が 0 になったときの $d$ が固有値、$Q$ の列が固有ベクトルである。
+1つの固有値あたり 50 回の掃引で収束しなければエラーとする。
 
 == SCF 手順
 

@@ -66,8 +66,8 @@ pub struct SinglePoint {
     pub electron_count: Option<f64>,
     /// Number of grid points (0 for HF).
     pub n_grid_points: usize,
-    /// DFT-D3 dispersion energy (Hartree, theory.typ eq:d3-e); `None` without a UNCHECKED(Grimme2010)
-    /// dispersion correction ([`Calculation::with_dispersion`]).
+    /// DFT-D3 dispersion energy (Hartree, theory.typ eq:d3-e). UNCHECKED(Grimme2010)
+    /// `None` without a dispersion correction ([`Calculation::with_dispersion`]).
     pub dispersion_energy: Option<f64>,
 }
 
@@ -85,7 +85,7 @@ pub struct GradientResult {
     pub scf: ScfResult,
     /// DFT-D3 dispersion energy (Hartree); `None` without a dispersion correction.
     pub dispersion_energy: Option<f64>,
-    /// DFT-D3 dispersion gradient per atom (Hartree/Bohr, theory.typ eq:d3-grad); DERIVED
+    /// DFT-D3 dispersion gradient per atom (Hartree/Bohr, theory.typ eq:d3-grad). DERIVED
     /// `None` without a dispersion correction.
     pub dispersion_gradient: Option<Vec<[f64; 3]>>,
 }
@@ -236,8 +236,9 @@ impl Calculation {
 
     /// Single-point energy.
     pub fn energy(&self) -> Result<SinglePoint> {
-        let (scf, xc, _) = self.run(&self.molecule, &self.scf_options, false)?;
+        // Dispersion first: it is cheap and fails on unsupported elements before the SCF.
         let e_disp = self.dispersion.as_ref().map(|p| dispersion_energy(&self.molecule, p)).transpose()?;
+        let (scf, xc, _) = self.run(&self.molecule, &self.scf_options, false)?;
         Ok(SinglePoint {
             // eq:d3-total. Without dispersion this is scf.energy unchanged.
             energy: e_disp.map_or(scf.energy, |e| scf.energy + e),
@@ -251,9 +252,9 @@ impl Calculation {
     /// Energy and analytic gradient (theory.typ eq:grad, plus eq:d3-grad with a
     /// dispersion correction).
     pub fn gradient(&self) -> Result<GradientResult> {
+        let disp = self.dispersion_at(&self.molecule)?; // before the SCF, as in energy()
         let (scf, _, grad) = self.run(&self.molecule, &self.gradient_scf_options(), true)?;
         let components = grad.expect("gradient requested");
-        let disp = self.dispersion_at(&self.molecule)?;
         let (energy, gradient) = add_dispersion(scf.energy, components.total(), disp.as_ref());
         let (dispersion_energy, dispersion_gradient) = disp.unzip();
         Ok(GradientResult { energy, gradient, components, scf, dispersion_energy, dispersion_gradient })
@@ -267,10 +268,10 @@ impl Calculation {
         let mut last_density: Option<Matrix> = base.initial_density.clone();
         let res = bfgs_minimize(&self.molecule.coordinates(), settings, |x| {
             let mol = self.molecule.with_coordinates(x)?;
+            let disp = self.dispersion_at(&mol)?; // before the SCF, as in energy()
             let opts = ScfOptions { initial_density: last_density.clone(), ..base.clone() };
             let (scf, _, grad) = self.run(&mol, &opts, true)?;
             last_density = Some(scf.density);
-            let disp = self.dispersion_at(&mol)?;
             let (e, g) = add_dispersion(scf.energy, grad.expect("gradient requested").total(), disp.as_ref());
             Ok((e, g.iter().flatten().copied().collect()))
         })?;

@@ -388,9 +388,9 @@ impl D3Parameters {
 }
 
 /// Two-body energy e_AB of one atom pair at distance `r` (theory.typ eq:d3-e) and
-/// its derivative ∂e_AB/∂r at fixed C6 (eq:d3-dedr), with C8 from eq:d3-c8 and DERIVED
-/// the damping of eq:d3-bj or eq:d3-zero.
-/// The tabulated R0^AB is looked up for zero damping only.
+/// its derivative ∂e_AB/∂r at fixed C6 (eq:d3-dedr), with C8 from eq:d3-c8. DERIVED
+/// The damping is eq:d3-bj or eq:d3-zero; the tabulated R0^AB is looked up for
+/// zero damping only.
 fn pair_energy(damping: &D3Damping, data: &D3Data, za: u32, zb: u32, c6: f64, r: f64) -> Result<(f64, f64)> {
     // eq:d3-c8: C8 = 3 C6 sqrt(Q_A Q_B), with r4r2 = sqrt(Q).
     let q = 3.0 * data.r4r2(za)? * data.r4r2(zb)?;

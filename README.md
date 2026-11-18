@@ -274,6 +274,7 @@ Helgaker, Jørgensen & Olsen *Molecular Electronic-Structure Theory*（Wiley, 20
 - Q. Sun ほか, *WIREs Comput. Mol. Sci.* **8**, e1340 (2018); *J. Chem. Phys.* **153**, 024109 (2020) — PySCF。
 - S. Lehtola ほか, *SoftwareX* **7**, 1 (2018) — Libxc。
 - L.-P. Wang, C. Song, *J. Chem. Phys.* **144**, 214108 (2016) — geomeTRIC。
+
 DOI つきの一覧と、各論文と実装を照合した結果は [docs/papers/README.md](docs/papers/README.md) にあります。
 
 ## 基底関数データ

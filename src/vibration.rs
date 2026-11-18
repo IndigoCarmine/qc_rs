@@ -42,6 +42,11 @@ const ELECTRON_MASS_IN_U: f64 = 5.48579909065e-4;
 /// eq:tr-vectors; a numerical convention, not a literature value). DERIVED
 const ROTATION_THRESHOLD: f64 = 1e-6;
 
+/// Rotations are kept only if I_3 > ROTATION_ABSOLUTE_THRESHOLD · Σ_A m_A |R_A|²
+/// (theory.typ eq:tr-vectors), so that the rounding residual of R_cm for a single atom
+/// (I_3 ~ 1e-31 m |R|²) gives no rotation. A numerical convention. DERIVED
+const ROTATION_ABSOLUTE_THRESHOLD: f64 = 1e-20;
+
 /// Standard atomic weight (u) of element `z` (theory.typ eq:mass-weight table),
 /// `None` outside H–Ar. UNCHECKED(Meija2016)
 pub fn standard_atomic_mass(z: u32) -> Option<f64> {
@@ -74,7 +79,7 @@ pub struct HarmonicAnalysis {
     pub eigenvalues: Vec<f64>,
     /// Number of translations and rotations removed: 6, 5 (linear) or 3 (one atom).
     pub n_trans_rot: usize,
-    /// Whether exactly two rotations were kept (theory.typ eq:tr-vectors).
+    /// Whether exactly two rotations were kept (theory.typ eq:tr-vectors); false for one atom.
     pub is_linear: bool,
     /// Masses used (u), one per atom.
     pub masses: Vec<f64>,
@@ -83,6 +88,9 @@ pub struct HarmonicAnalysis {
 impl HarmonicAnalysis {
     /// Cartesian displacements d_k,i = l_k,i / √m_i as columns (3 N × n_modes,
     /// u^-1/2), not normalized. theory.typ sec:freq DERIVED
+    ///
+    /// Column k is ∂x/∂Q_k, the factor l_k,j / √m_j that converts Cartesian dipole
+    /// derivatives into ∂μ/∂Q_k in theory.typ eq:ir-intensity.
     pub fn cartesian_displacements(&self) -> Matrix {
         let n = self.normal_modes.rows();
         Matrix::from_fn(n, self.normal_modes.cols(), |i, k| self.normal_modes[(i, k)] / self.masses[i / 3].sqrt())
@@ -94,8 +102,8 @@ impl HarmonicAnalysis {
 /// to [`standard_atomic_mass`]. Only the symmetric part of `hessian` is used.
 ///
 /// Steps: mass weighting (eq:mass-weight); translation and principal-axis rotation
-/// vectors about the centre of mass (eq:tr-vectors), rotations kept only above
-/// 10⁻⁶ I_3; an orthonormal basis D_int of their complement from the eigenvectors of
+/// vectors about the centre of mass (eq:tr-vectors), rotation a kept only if
+/// I_a > 10⁻⁶ I_3 and I_3 > 10⁻²⁰ Σ_A m_A |R_A|² (so a single atom has none); an orthonormal basis D_int of their complement from the eigenvectors of
 /// the projector P = 1 − D_tr D_trᵀ with eigenvalue 1; diagonalization of
 /// D_intᵀ H̃ D_int; wavenumbers (eq:freq) and reduced masses (eq:reduced-mass).
 pub fn harmonic_analysis(mol: &Molecule, hessian: &Matrix, masses: Option<&[f64]>) -> Result<HarmonicAnalysis> {
@@ -155,6 +163,9 @@ pub fn harmonic_analysis(mol: &Molecule, hessian: &Matrix, masses: Option<&[f64]
     }
     let principal = symmetric_eigen(&inertia)?;
     let i3 = principal.values[2];
+    let raw_second_moment: f64 =
+        atoms.iter().zip(&masses).map(|(a, m)| m * a.position.iter().map(|x| x * x).sum::<f64>()).sum();
+    let has_rotations = i3 > ROTATION_ABSOLUTE_THRESHOLD * raw_second_moment;
 
     let mut tr: Vec<Vec<f64>> = Vec::with_capacity(6);
     for alpha in 0..3 {
@@ -163,7 +174,7 @@ pub fn harmonic_analysis(mol: &Molecule, hessian: &Matrix, masses: Option<&[f64]
     }
     let mut n_rot = 0;
     for a in 0..3 {
-        if principal.values[a] > ROTATION_THRESHOLD * i3 {
+        if has_rotations && principal.values[a] > ROTATION_THRESHOLD * i3 {
             // (r_a)_A = √m_A u_a × r_A
             let u = [principal.vectors[(0, a)], principal.vectors[(1, a)], principal.vectors[(2, a)]];
             let mut v = vec![0.0; n];
@@ -192,7 +203,11 @@ pub fn harmonic_analysis(mol: &Molecule, hessian: &Matrix, masses: Option<&[f64]
         d_tr.push(v);
     }
     let n_trans_rot = d_tr.len();
-    let n_modes = n - n_trans_rot;
+    let Some(n_modes) = n.checked_sub(n_trans_rot) else {
+        return Err(QcError::InvalidInput(format!(
+            "{n_trans_rot} translation/rotation vectors for {n} coordinates"
+        )));
+    };
 
     // P = 1 − D_tr D_trᵀ; its eigenvectors with eigenvalue 1 span the internal space.
     let projector = Matrix::from_fn(n, n, |i, j| {
@@ -289,6 +304,43 @@ mod tests {
         assert!(r.frequencies_cm1.is_empty());
         assert_eq!(r.normal_modes.cols(), 0);
         assert!(!r.is_linear);
+    }
+
+    /// One atom anywhere, with any mass: no rotations survive the rounding residual of
+    /// the centre of mass (theory.typ eq:tr-vectors), so 3 removed and no modes.
+    #[test]
+    fn single_atom_anywhere_has_no_modes() {
+        let mut cases = vec![([23.512380016315916, -623.662928435504, 0.7545925045118286], 49.30571047624649)];
+        // Deterministic pseudo-random positions (|x| up to 1e3 Bohr) and masses (0.5–250 u).
+        let mut state: u64 = 0x2545F4914F6CDD1D;
+        let mut next = || {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        for _ in 0..2000 {
+            let p = [0, 1, 2].map(|_| (next() - 0.5) * 2e3);
+            cases.push((p, 0.5 + 249.5 * next()));
+        }
+        for (p, m) in cases {
+            let mol = Molecule::from_symbols(&["Ne"], &[p], Unit::Bohr, 0).unwrap();
+            let r = harmonic_analysis(&mol, &Matrix::zeros(3, 3), Some(&[m])).unwrap();
+            assert_eq!(r.n_trans_rot, 3, "{p:?} {m}");
+            assert!(r.frequencies_cm1.is_empty() && r.normal_modes.cols() == 0 && !r.is_linear, "{p:?} {m}");
+        }
+    }
+
+    /// A small molecule far from the origin keeps all its rotations.
+    #[test]
+    fn molecule_far_from_origin_keeps_rotations() {
+        let mol = water();
+        let x: Vec<f64> = mol.coordinates().iter().enumerate().map(|(i, x)| x + [4e3, -7e3, 2e3][i % 3]).collect();
+        let far = mol.with_coordinates(&x).unwrap();
+        let base = harmonic_analysis(&mol, &spring_hessian(&mol), None).unwrap();
+        let r = harmonic_analysis(&far, &spring_hessian(&far), None).unwrap();
+        assert_eq!(r.n_trans_rot, 6);
+        for (a, b) in base.frequencies_cm1.iter().zip(&r.frequencies_cm1) {
+            assert!((a - b).abs() < 1e-6, "{a} vs {b}");
+        }
     }
 
     #[test]

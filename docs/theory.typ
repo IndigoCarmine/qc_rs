@@ -759,3 +759,133 @@ $partial_x$ は電子座標での微分。基底関数の2階微分 $nabla parti
   出発点が極小でも少なくとも1ステップは進む。
 
 SCF の初期値には前の構造の密度行列を使ってよい。$H^(-1) vb(g)$ は連立方程式を解いて求める。
+
+= 分散補正 DFT-D3 <sec:d3>
+
+Grimme ら（2010）の DFT-D3 の2体項を、Becke–Johnson 減衰（D3(BJ)、Grimme, Ehrlich, Goerigk 2011）と
+ゼロ減衰（D3(0)、Grimme ら 2010）の2通りで扱う。補正は核の位置と元素だけで決まり、密度に依らないので、
+SCF には入らず全エネルギーと勾配に足すだけである：
+
+$ E_"tot" = E_"SCF" + E_"disp", quad (dif E_"tot") / (dif vb(R)_A) = (dif E_"SCF") / (dif vb(R)_A) + (dif E_"disp") / (dif vb(R)_A) $
+
+対象外とするもの：3体項（Axilrod–Teller–Muto）、D2・D4、改良版の D3M、周期系。
+距離の打ち切りはせず、すべての原子対を足す（$N_"atom"^2$ 程度の計算で、分子では問題にならない）。
+
+*出典の状況。* Grimme 研究室が公開している DFT-D3 プログラムの説明書（Ver. 3.2 Rev 0、2016）で確かめたのは、
+@eq:d3-e の形、@eq:d3-bj と @eq:d3-zero の減衰関数、$R_0^(A B) = sqrt(C_8^(A B) slash C_6^(A B))$（BJ のみ）、
+ゼロ減衰の $s_(r,8) = 1$、$alpha_6 = 14$、$alpha_8 = alpha_6 + 2$、それに下のパラメータ表（研究室の公開ページ）である。
+配位数 @eq:d3-cn、$C_6$ の補間 @eq:d3-c6、$C_8$ @eq:d3-c8 は原論文（Grimme ら 2010）の式だが、論文はまだ入手しておらず*未照合*である
+（`docs/papers/README.md`）。照合までは式・定数を確定扱いにしない。
+説明書によるとプログラムの既定値には打ち切り（分散 95 $a_0$、配位数 40 $a_0$）があり、これより大きい分子では参照値との比較に差が出うる。
+
+== エネルギー
+
+原子対 $A < B$、距離 $r = r_(A B) = abs(vb(R)_A - vb(R)_B)$ について
+
+$ E_"disp" = - sum_(A < B) sum_(n = 6, 8) s_n C_n^(A B) / r_(A B)^n f_n (r_(A B)) $ <eq:d3-e>
+
+（説明書の $-1/2 sum_(A != B)$ と同じ。）$C_n^(A B)$ は原子対の（等方的な）分散係数（$E_h a_0^n$）、
+$s_n$ は汎関数ごとの係数、$f_n$ は減衰関数。BJ 減衰は $C_n^(A B) slash r^n dot f_n$ をまとめて書く方が見やすいので、
+@eq:d3-bj ではその形で与える。
+
+== 配位数
+
+$ "CN"_A = sum_(B != A) 1 / (1 + exp[-k_1 (k_2 (R_A^"cov" + R_B^"cov") / r_(A B) - 1)]), quad
+  k_1 = 16, quad k_2 = 4 slash 3 $ <eq:d3-cn>
+
+$R^"cov"$ は Pyykkö と Atsumi（2009）の単結合の共有結合半径。
+*未確認：* 原論文がこの半径に何らかのスケール（たとえば金属だけ小さくする）を掛けているか、
+数表として持つ値が $k_2$ を掛ける前か後か。データを取り込むときに論文で確かめ、
+ここでは「数表の値は $k_2$ を掛ける前の半径 $R^"cov"$（$a_0$）」と約束しておく（掛けた後の値を持つなら @eq:d3-cn の $k_2$ を 1 にする）。
+
+== $C_6$ の補間
+
+元素ごとに参照の配位数 $"CN"_A^i$（$i = 1 ... N_A$）があり、参照の組ごとに係数 $C_(6, "ref")^(A B)("CN"_A^i, "CN"_B^j)$ が与えられている（Grimme ら 2010 の補足資料）。
+実際の配位数での値は Gauss 重みによる平均である：
+
+$ C_6^(A B) = (sum_(i j) C_(6, "ref")^(A B, i j) L_(i j)) / (sum_(i j) L_(i j)), quad
+  L_(i j) = exp(-k_3 d_(i j)), quad
+  d_(i j) = ("CN"_A - "CN"_A^i)^2 + ("CN"_B - "CN"_B^j)^2, quad k_3 = 4 $ <eq:d3-c6>
+
+*アンダーフロー。* 配位数が参照から遠いと（$k_3 d_(i j) > 745$ 程度）すべての $L_(i j)$ が倍精度で 0 になり、0/0 になる。
+比は $L$ を共通の正の因子で割っても変わらないので、$d_min = min_(i j) d_(i j)$ として
+$L_(i j) = exp(-k_3 (d_(i j) - d_min))$ で計算する（最大の重みが 1 になり、分母は 1 以上）。
+これは @eq:d3-c6 と数学的に同じで、規則を足すものではない。微分（@eq:d3-grad）も同じ置き換えでよい。
+ただし参照プログラムがこの領域で同じ値を返すかは確かめていない（通常の分子では起きない）。
+
+== $C_8$
+
+$ C_8^(A B) = 3 C_6^(A B) sqrt(Q_A Q_B) $ <eq:d3-c8>
+
+$Q_A$ は元素ごとの定数で、原子の $chevron.l r^4 chevron.r slash chevron.l r^2 chevron.r$ と $sqrt(Z_A)$ から作られる。
+*未確認：* $Q_A$ の正確な定義（$sqrt(Z_A) chevron.l r^4 chevron.r slash chevron.l r^2 chevron.r$ に掛かる係数の有無と値）、
+および He、Ne、Ar などの $chevron.l r^4 chevron.r slash chevron.l r^2 chevron.r$ が後から計算し直された版があるかとどちらを使うか。
+どちらも数表を取り込むステップで論文と照合してから決める。$C_8$ は $C_6$ に比例するので、$Q$ は配位数に依らない。
+
+== Becke–Johnson 減衰
+
+$ E_"disp"^"BJ" = - sum_(A < B) sum_(n = 6, 8) s_n C_n^(A B) / (r_(A B)^n + (a_1 R_0^(A B) + a_2)^n), quad
+  R_0^(A B) = sqrt(C_8^(A B) / C_6^(A B)) $ <eq:d3-bj>
+
+（Johnson と Becke 2005 の有理減衰を Grimme ら 2011 が D3 に使ったもの。）@eq:d3-c8 より
+$R_0^(A B) = (9 Q_A Q_B)^(1 slash 4)$ で、配位数に依らない。$a_2$ は長さで、$a_0$ として扱う
+（*未確認：* 公開ページの表は単位を書いていない。Grimme ら 2011 の表の単位と照合する）。
+
+== ゼロ減衰
+
+$ f_n (r_(A B)) = 1 / (1 + 6 (r_(A B) slash (s_(r, n) R_0^(A B)))^(-alpha_n)), quad
+  alpha_6 = 14, quad alpha_8 = 16, quad s_(r, 8) = 1 $ <eq:d3-zero>
+
+ここでの $R_0^(A B)$ は BJ の $sqrt(C_8 slash C_6)$ *ではなく*、Grimme ら（2010）が原子対ごとに計算した
+打ち切り半径の数表である（説明書：「the $R_0^(A B)$ used with this damping are from Ref. 1」）。
+数表（94 元素の対）は補足資料にあり、取り込むときにライセンスを確かめる。
+
+== パラメータ
+
+$s_6 = 1$（GGA・混成汎関数）。値は Grimme 研究室の公開ページ（BJ・ゼロ減衰の表）による：
+
+#align(center, table(
+  columns: 7, stroke: 0.4pt, inset: 5pt, align: center,
+  [汎関数], [D3(BJ) $s_6$], [$a_1$], [$s_8$], [$a_2$ ($a_0$)], [D3(0) $s_(r,6)$], [$s_8$],
+  [B3LYP], [1.000], [0.3981], [1.9889], [4.4211], [1.261], [1.703],
+  [CAM-B3LYP], [1.000], [0.3708], [2.0674], [5.4743], [1.378], [1.217],
+))
+
+*未確認：* これらが当てはめられた B3LYP が VWN-RPA 版・VWN5 版のどちらか（@sec:xc の B3LYP は VWN-RPA）。
+公開ページと説明書には書かれていない。差は小さいと見込まれるが、論文で確かめるまでは
+B3LYP（VWN-RPA）と B3LYP5 のどちらにも同じ値を使い、その旨を利用者に示す。
+
+== 勾配
+
+$E_"disp"$ は距離 $r_(A B)$ と配位数を通して核座標に依る。対ごとのエネルギーを
+$e_(A B) = -sum_n s_n C_n^(A B) slash r^n f_n$ と書く。
+
+*$C_6$ についての微分。* @eq:d3-bj でも @eq:d3-zero でも $R_0^(A B)$ は配位数に依らず、
+$C_8$ は $C_6$ に比例するので、$e_(A B)$ は $C_6^(A B)$ の1次式である：$partial e_(A B) slash partial C_6^(A B) = e_(A B) slash C_6^(A B)$。
+
+*距離についての微分。*
+
+$ (partial e_(A B)) / (partial r)
+  = sum_n s_n C_n^(A B) n r^(n-1) / (r^n + (a_1 R_0 + a_2)^n)^2 quad ("BJ"), quad
+  (partial e_(A B)) / (partial r)
+  = sum_n s_n C_n^(A B) f_n / r^(n+1) [n - 6 alpha_n t_n^(-alpha_n) f_n], quad t_n = r / (s_(r,n) R_0) quad ("ゼロ") $
+
+*配位数の微分。* @eq:d3-cn の各項を $g_(A B) = 1 slash (1 + e^u)$、$u = -k_1 (R_(A B)^c slash r - 1)$、$R_(A B)^c = k_2 (R_A^"cov" + R_B^"cov")$ とすると
+
+$ (dif g_(A B)) / (dif r) = -g_(A B) (1 - g_(A B)) k_1 R_(A B)^c / r^2 $
+
+$g_(A B)$ は $"CN"_A$ と $"CN"_B$ の両方に入る。@eq:d3-c6 の分子・分母を $Z, W$ とすると
+
+$ (partial C_6^(A B)) / (partial "CN"_A) = (Z' W - Z W') / W^2, quad
+  Z' = sum_(i j) C_(6, "ref")^(A B, i j) (partial L_(i j)) / (partial "CN"_A), quad
+  W' = sum_(i j) (partial L_(i j)) / (partial "CN"_A), quad
+  (partial L_(i j)) / (partial "CN"_A) = -2 k_3 ("CN"_A - "CN"_A^i) L_(i j) $
+
+（$"CN"_B$ も同様。）各原子の $D_A = partial E_"disp" slash partial "CN"_A = sum_(B != A) (e_(A B) slash C_6^(A B)) partial C_6^(A B) slash partial "CN"_A$ を先に求めておくと、
+
+$ (dif E_"disp") / (dif vb(R)_A) = sum_(B != A) [(partial e_(A B)) / (partial r) + (D_A + D_B) (dif g_(A B)) / (dif r)]
+  (vb(R)_A - vb(R)_B) / r_(A B) $ <eq:d3-grad>
+
+（連鎖律による導出で、文献の式ではない。）各対は $vb(R)_A - vb(R)_B$ だけに依るので並進不変性
+$sum_A dif E_"disp" slash dif vb(R)_A = vb(0)$ が厳密に成り立つ。検証は中心差分（@sec:grad の検証用の恒等式と同じ）で行う。
+

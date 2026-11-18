@@ -126,6 +126,22 @@ PySCF との数値一致（`tests/`）は全項目で確認済みですが、そ
 | Goldfarb1970 | D. Goldfarb, *Math. Comp.* **24**, 23 (1970) | 10.1090/S0025-5718-1970-0258249-6 | `goldfarb1970.pdf` | 同上 | なし |
 | Shanno1970 | D. F. Shanno, *Math. Comp.* **24**, 647 (1970) | 10.1090/S0025-5718-1970-0274029-X | `shanno1970.pdf` | 同上 | なし |
 
+### 分散補正
+
+`docs/theory.typ` の節 `<sec:d3>`。2026-11-18 時点で 4 本とも未収集で、`eq:d3-*` はどれも論文と照合していない。
+パラメータ表と式の一部（エネルギーの形、BJ・ゼロ減衰の関数、R_0 = sqrt(C_8/C_6)、s_r,8、α_n）は
+Grimme 研究室の公開ページ（下の GrimmeD3web）で確かめた。
+
+| キー | 論文 | DOI | ファイル名 | 確認する内容 | PDF |
+|---|---|---|---|---|---|
+| Grimme2010 | S. Grimme, J. Antony, S. Ehrlich, H. Krieg, *J. Chem. Phys.* **132**, 154104 (2010) | 10.1063/1.3382344 | `grimme2010_d3.pdf` | D3 のエネルギー、配位数と k_1, k_2（共有結合半径のスケールの扱い）、C_6 の Gauss 補間と k_3、C_8 と Q_A の定義（係数の有無）、ゼロ減衰と α_n、原子対の R_0 の数表、C_6 参照値（補足資料）、B3LYP のパラメータを当てはめた汎関数の版（VWN-RPA / VWN5） | なし |
+| Grimme2011 | S. Grimme, S. Ehrlich, L. Goerigk, *J. Comput. Chem.* **32**, 1456 (2011) | 10.1002/jcc.21759 | `grimme2011_d3bj.pdf` | D3(BJ) の式、R_0 = sqrt(C_8/C_6)、a_1, s_8, a_2 の表と a_2 の単位 | なし |
+| Johnson2005 | E. R. Johnson, A. D. Becke, *J. Chem. Phys.* **123**, 024101 (2005) | 10.1063/1.1949201 | `johnson2005_bj.pdf` | 有理（BJ）減衰の元の形 | なし |
+| Pyykko2009 | P. Pyykkö, M. Atsumi, *Chem. Eur. J.* **15**, 186 (2009) | 10.1002/chem.200800987 | `pyykko2009_rcov.pdf` | 単結合の共有結合半径の値 | なし |
+| GrimmeD3web | Grimme 研究室 DFT-D3 の公開ページ（chemie.uni-bonn.de/grimme/de/software/dft-d3：bj_damping、zero_damping）と同所のプログラム説明書 man.pdf（Ver. 3.2 Rev 0, 2016） | — | — | 汎関数ごとのパラメータ（B3LYP、CAM-B3LYP）、式 (3)–(8)、既定の打ち切り（95 a_0、配位数 40 a_0）。2026-11-18 に閲覧 | — |
+
+DOI は Crossref（Pyykko2009 は doi.org のハンドル解決）で著者・題名・巻・ページを確認した。
+
 ### 基底関数
 
 データは Basis Set Exchange から取得したもので、原論文の表の値との照合はしていません。

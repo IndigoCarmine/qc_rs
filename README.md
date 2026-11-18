@@ -129,6 +129,14 @@ python -m venv .venv
 
 参照値の JSON はリポジトリに入っているので、`cargo test` に Python や PySCF は要りません。
 
+分散補正 D3 の参照値 `tests/reference/d3_reference.json` は、dftd3 1.7.0（simple-dftd3 の Python API、LGPL。参照値を作るためだけに使い、同梱しない）で作りました。
+減衰パラメータは汎関数名で読み込まず数値で渡し、3 体項は切り（s9 = 0）、カットオフは全原子間距離より大きくしています：
+
+```sh
+.venv/Scripts/pip install dftd3==1.7.0          # Linux / macOS は .venv/bin/
+.venv/Scripts/python tests/reference/gen_d3_reference.py
+```
+
 ### テスト用分子の追加
 
 `tests/molecules/` に XYZ ファイル（座標は Å）を置くと、テスト `tests/molecules_pyscf.rs` が自動で拾い、

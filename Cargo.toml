@@ -3,7 +3,7 @@ name = "qc_rs"
 version = "0.5.0"
 edition = "2024"
 license = "BSD-3-Clause"
-description = "Closed-shell Hartree-Fock and Kohn-Sham DFT energies, analytic gradients and geometry optimization"
+description = "Closed-shell Hartree-Fock and Kohn-Sham DFT energies, analytic gradients, geometry optimization, DFT-D3 dispersion correction, harmonic frequencies, IR intensities and thermochemistry"
 
 [dependencies]
 rayon = "1"

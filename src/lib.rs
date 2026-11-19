@@ -1,5 +1,7 @@
 //! `qc_rs`: closed-shell Hartree–Fock and Kohn–Sham DFT with Gaussian basis sets:
-//! single-point energies, analytic nuclear gradients and geometry optimization.
+//! single-point energies, analytic nuclear gradients, geometry optimization, the
+//! DFT-D3 dispersion correction, and harmonic frequencies, IR intensities and
+//! thermochemistry.
 //!
 //! The mathematics follows `docs/theory.typ`; comments cite its equation labels.
 //!

@@ -1,5 +1,5 @@
 //! Values and first/second Cartesian derivatives of the AO basis functions at
-//! arbitrary points (theory.typ eq:contracted, eq:ao-deriv, eq:sph-d). UNCHECKED(Helgaker2000) UNCHECKED(Schlegel1995)
+//! arbitrary points (theory.typ eq:contracted, eq:ao-deriv, eq:sph-d, eq:sph-f). UNCHECKED(Helgaker2000) UNCHECKED(Schlegel1995)
 //!
 //! A Cartesian component is χ = c_lmn P(r_A) g(r_A²) with P = x^l y^m z^n and
 //! g = Σ_k d̃_k e^{-a_k r_A²}. With G0 = g, G_i = ∂_i g = x_i R1 and
@@ -405,7 +405,7 @@ mod tests {
         }
     }
 
-    /// `eval_ao` built on the reference kernel (same spherical transform, eq:sph-d).
+    /// `eval_ao` built on the reference kernel (same spherical transform, eq:sph-d, eq:sph-f).
     fn reference_eval_ao(basis: &Basis, points: &[[f64; 3]], deriv: usize) -> AoValues {
         let n_ao = basis.nao();
         let np = points.len();

@@ -1,5 +1,5 @@
 //! Gaussian basis sets: Gaussian94 parser, contracted shells, normalization,
-//! spherical d and f transformations and AO bookkeeping (theory.typ section 2).
+//! spherical d and f transformations and AO bookkeeping (theory.typ sec:basis).
 
 use crate::error::{QcError, Result};
 use crate::molecule::{Molecule, atomic_number, element_symbol};
@@ -80,7 +80,7 @@ impl BasisSetDefinition {
         Self::from_gbs(name, text)
     }
 
-    /// Parses Gaussian94-format text (theory.typ section 2.4).
+    /// Parses Gaussian94-format text (theory.typ sec:basis-file).
     pub fn from_gbs(name: &str, text: &str) -> Result<Self> {
         let mut elements = HashMap::new();
         let lines: Vec<&str> = text.lines().map(|l| l.trim()).collect();
@@ -184,7 +184,7 @@ pub fn cartesian_norm(lmn: [usize; 3]) -> f64 {
     (odd_double_factorial(l) / den).sqrt()
 }
 
-/// Cartesian components of angular momentum `l` in lexicographic order (theory.typ section 2.2).
+/// Cartesian components of angular momentum `l` in lexicographic order (theory.typ sec:contracted).
 pub fn cartesian_components(l: usize) -> Vec<[usize; 3]> {
     let mut v = Vec::with_capacity((l + 1) * (l + 2) / 2);
     for lx in (0..=l).rev() {

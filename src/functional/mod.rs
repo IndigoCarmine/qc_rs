@@ -81,7 +81,7 @@ pub struct XcValues {
 }
 
 /// f = Σ_k c_k f_k plus exact exchange with the kernel [α + β erf(ωr)]/r
-/// (theory.typ section 9.5 and eq:cam-b3lyp; an ordinary hybrid has α = a_HF, β = 0). VERIFIED(Yanai2004, Eq. (9), p. 55; p. 53 and Table 1)
+/// (theory.typ eq:cam-b3lyp; an ordinary hybrid has α = a_HF, β = 0). VERIFIED(Yanai2004, Eq. (9), p. 55; p. 53 and Table 1)
 #[derive(Debug, Clone, PartialEq)]
 pub struct Functional {
     name: String,

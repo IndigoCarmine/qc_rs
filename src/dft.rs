@@ -8,6 +8,8 @@
 //! beyond its [`shell_cutoff_radius`] for |χ|, |∇χ|, |∇∇χ| < 10⁻¹⁵ — a rigorous bound,
 //! so the screening has no measurable effect. AO values of as many blocks as fit
 //! the memory budget are computed once and reused in every SCF iteration.
+//!
+//! [`GridBlock`]: crate::grid::GridBlock
 
 use crate::ao_eval::{AoValues, D_X, eval_ao_shells, shell_cutoff_radius};
 use crate::basis::Basis;

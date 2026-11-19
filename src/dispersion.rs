@@ -1,4 +1,4 @@
-//! DFT-D3 building blocks (theory.typ section sec:d3): the reference data, the
+//! DFT-D3 building blocks (theory.typ sec:d3): the reference data, the
 //! coordination number with its nuclear derivatives (eq:d3-cn) and the Gaussian UNCHECKED(Grimme2010) UNCHECKED(Pyykko2009)
 //! interpolation of C6 with its derivatives with respect to the coordination
 //! numbers (eq:d3-c6), the damping parameters of D3(BJ) and D3(0) and the UNCHECKED(Grimme2010)

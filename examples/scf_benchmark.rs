@@ -5,7 +5,8 @@
 //! ```
 //!
 //! `<molecule>` is an XYZ file (Å) or one of the built-in `h2co`, `benzene`. Options:
-//! `--method hf` (or a functional name), `--basis 6-31g*`, `--cart` (Cartesian d),
+//! `--method hf` (or a functional name), `--basis 6-31g*`,
+//! `--cart` (Cartesian d and f: 6d, 10f),
 //! `--strategy stored|direct|auto`, `--threshold 1e-12` (direct screening),
 //! `--no-incremental`, `--gradient`, `--repeat N` (run the calculation N times and
 //! report the shortest wall time; the detailed output is from the last run).
@@ -190,7 +191,7 @@ fn main() -> qc_rs::Result<()> {
     let total = times.iter().copied().fold(f64::INFINITY, f64::min);
     println!(
         "{name} {method}/{basis}{} nao={} threads={} strategy={:?}",
-        if args.iter().any(|a| a == "--cart") { " (6d)" } else { "" },
+        if args.iter().any(|a| a == "--cart") { " (cart)" } else { "" },
         scf.coefficients.rows(),
         rayon::current_num_threads(),
         scf.integral_strategy

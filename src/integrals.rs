@@ -1,5 +1,5 @@
 //! Contracted AO integrals: overlap, kinetic, nuclear attraction, dipole and
-//! two-electron repulsion integrals (theory.typ sections 4–5).
+//! two-electron repulsion integrals (theory.typ sec:oneel, sec:eri).
 //!
 //! Primitive integrals come from [`crate::hermite`]; this module applies the
 //! contraction coefficients d̃_k, the Cartesian factors c_lmn (eq:contracted) and UNCHECKED(Helgaker2000)

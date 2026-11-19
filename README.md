@@ -239,8 +239,8 @@ RHF/6-31G と B3LYP/6-31G のエネルギーと勾配を PySCF の参照値と�
 
 | 量 | ケース | 偏差 |
 |---|---|---|
-| RHF 全エネルギー | 11 分子/基底 | 1.2e-12 Eh |
-| RHF 軌道エネルギー・双極子 | 同上（既定の SCF 収束） | 8.9e-8・1.1e-7 |
+| RHF 全エネルギー | 11 分子/基底 | 3.3e-13 Eh（`tests/gradient_pyscf.rs` の H2O/6-31G\*\*。`tests/rhf_pyscf.rs` の一点計算では 2.1e-13） |
+| RHF 軌道エネルギー・双極子 | 同上（既定の SCF 収束、`tests/rhf_pyscf.rs`） | 1.4e-8・3.5e-8 |
 | RKS 全エネルギー | 13（細かい格子、PySCF は 150 × 1202 Lebedev） | 4.0e-8 Eh |
 | RKS 軌道エネルギー・双極子 | 同上 | 4.8e-8・2.6e-8 |
 | RHF 勾配 | 11（デカルト d、HCl を含む） | 6.9e-10 Eh/Bohr |
@@ -253,6 +253,7 @@ RHF/6-31G と B3LYP/6-31G のエネルギーと勾配を PySCF の参照値と�
 | CAM-B3LYP 勾配 | 同上 | 1.5e-6 Eh/Bohr（H2CO。他は 4e-8 以下） |
 | CAM-B3LYP 最適化 | H2O（6-31G、PySCF は 99 × 590 格子） | エネルギー 8.4e-9 Eh、距離 9.2e-7 Bohr |
 | RHF 全エネルギー（6-311G\*\* と f を含む基底） | 6：H2O/6-311G\*\*、H2O・歪んだ H2O・HCl の 6-31G(2df,p)、H2O/6-31G(2df,p) のデカルト（6d・10f）、H2O/6-311G(2df,2pd) | 1.4e-12 Eh（`tests/gradient_pyscf.rs` の HCl。`tests/rhf_pyscf.rs` の一点計算では 7.4e-13） |
+| RHF 軌道エネルギー・双極子（同上） | 同上（既定の SCF 収束、`tests/rhf_pyscf.rs`） | 4.2e-8・1.2e-7（H2O/6-311G(2df,2pd)） |
 | RHF 勾配（同上） | 同上 | 4.9e-10 Eh/Bohr |
 | B3LYP・CAM-B3LYP 全エネルギー（f を含む基底） | H2O/6-31G(2df,p)（細かい格子） | 2.7e-9 Eh |
 | B3LYP・CAM-B3LYP 勾配（同上） | 同上 | 4.3e-8 Eh/Bohr |

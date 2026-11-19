@@ -8,7 +8,7 @@
 //!
 //! * Everything is done over the normalized *Cartesian* components: the density is
 //!   transformed once to P_cart = Tᵀ P T and the results back with J = T J_cart Tᵀ
-//!   (T the eq:sph-d matrix, the identity for Cartesian shells). This equals the
+//!   (T the eq:sph-d / eq:sph-f matrix, the identity for Cartesian shells). This equals the UNCHECKED(Schlegel1995)
 //!   contraction of the spherical integrals and avoids transforming every quartet.
 //! * The Hermite expansion coefficients E of every shell pair (eq:hermite-exp) are
 //!   computed once per basis and kept in sparse form; a quartet only evaluates the

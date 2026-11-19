@@ -6,8 +6,9 @@
 //! G_ij = ∂_i ∂_j g = δ_ij R1 + x_i x_j R2, where R1 = Σ_k (-2a_k) d̃_k e^{-a_k r²} and
 //! R2 = Σ_k 4a_k² d̃_k e^{-a_k r²}, the product rule gives
 //! ∂_i χ = c (P_i G0 + P G_i) and ∂_i∂_j χ = c (P_ij G0 + P_i G_j + P_j G_i + P G_ij),
-//! which is eq:ao-deriv applied once and twice. Spherical d functions are the fixed
-//! linear combinations eq:sph-d of the Cartesian ones (derivatives commute with it).
+//! which is eq:ao-deriv applied once and twice. Spherical d and f functions are the fixed
+//! linear combinations eq:sph-d and eq:sph-f of the Cartesian ones (derivatives commute UNCHECKED(Schlegel1995)
+//! with them).
 
 use crate::basis::{Basis, Shell, cartesian_components, cartesian_norm};
 
@@ -89,7 +90,7 @@ pub fn eval_ao_shells(basis: &Basis, shells: &[usize], points: &[[f64; 3]], deri
                 }
             }
             Some(t) => {
-                // theory.typ eq:sph-d
+                // theory.typ eq:sph-d, eq:sph-f
                 for c in 0..ncomp {
                     for (m, row) in t.iter().enumerate() {
                         let d = (c * n_ao + col + m) * np;

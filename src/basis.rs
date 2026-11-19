@@ -166,14 +166,43 @@ pub fn cartesian_components(l: usize) -> Vec<[usize; 3]> {
 
 const SQRT3_2: f64 = 0.866_025_403_784_438_6;
 
+/// A Cartesian→spherical transformation: one row per spherical function (m = -L..L),
+/// each row with one weight per normalized Cartesian component in lexicographic order.
+pub type SphericalTransform = [&'static [f64]];
+
 /// 5×6 Cartesian→spherical d transformation, rows m = -2..2, columns xx,xy,xz,yy,yz,zz.
 /// theory.typ eq:sph-d UNCHECKED(Schlegel1995)
-pub const CART_TO_SPH_D: [[f64; 6]; 5] = [
-    [0.0, 1.0, 0.0, 0.0, 0.0, 0.0],      // d(-2) = xy
-    [0.0, 0.0, 0.0, 0.0, 1.0, 0.0],      // d(-1) = yz
-    [-0.5, 0.0, 0.0, -0.5, 0.0, 1.0],    // d(0) = zz - xx/2 - yy/2
-    [0.0, 0.0, 1.0, 0.0, 0.0, 0.0],      // d(+1) = xz
-    [SQRT3_2, 0.0, 0.0, -SQRT3_2, 0.0, 0.0], // d(+2) = sqrt(3)/2 (xx - yy)
+pub const CART_TO_SPH_D: &SphericalTransform = &[
+    &[0.0, 1.0, 0.0, 0.0, 0.0, 0.0],      // d(-2) = xy
+    &[0.0, 0.0, 0.0, 0.0, 1.0, 0.0],      // d(-1) = yz
+    &[-0.5, 0.0, 0.0, -0.5, 0.0, 1.0],    // d(0) = zz - xx/2 - yy/2
+    &[0.0, 0.0, 1.0, 0.0, 0.0, 0.0],      // d(+1) = xz
+    &[SQRT3_2, 0.0, 0.0, -SQRT3_2, 0.0, 0.0], // d(+2) = sqrt(3)/2 (xx - yy)
+];
+
+/// a = sqrt(5/8) of eq:sph-f.
+const F_A: f64 = 0.790_569_415_042_094_9;
+/// b = sqrt(3/8) of eq:sph-f.
+const F_B: f64 = 0.612_372_435_695_794_5;
+/// 3a/sqrt(5) = 3/sqrt(8).
+const F_3A_R5: f64 = 1.060_660_171_779_821_2;
+/// b/sqrt(5) = sqrt(3/40).
+const F_B_R5: f64 = 0.273_861_278_752_583_04;
+/// 4b/sqrt(5).
+const F_4B_R5: f64 = 1.095_445_115_010_332_1;
+/// 3/(2 sqrt(5)).
+const F_3_2R5: f64 = 0.670_820_393_249_936_9;
+
+/// 7×10 Cartesian→spherical f transformation, rows m = -3..3, columns
+/// xxx,xxy,xxz,xyy,xyz,xzz,yyy,yyz,yzz,zzz. theory.typ eq:sph-f UNCHECKED(Schlegel1995)
+pub const CART_TO_SPH_F: &SphericalTransform = &[
+    &[0.0, F_3A_R5, 0.0, 0.0, 0.0, 0.0, -F_A, 0.0, 0.0, 0.0], // f(-3) = 3a/√5 xxy - a yyy
+    &[0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0],      // f(-2) = xyz
+    &[0.0, -F_B_R5, 0.0, 0.0, 0.0, 0.0, -F_B, 0.0, F_4B_R5, 0.0], // f(-1) = 4b/√5 yzz - b/√5 xxy - b yyy
+    &[0.0, 0.0, -F_3_2R5, 0.0, 0.0, 0.0, 0.0, -F_3_2R5, 0.0, 1.0], // f(0) = zzz - 3/(2√5) (xxz + yyz)
+    &[-F_B, 0.0, 0.0, -F_B_R5, 0.0, F_4B_R5, 0.0, 0.0, 0.0, 0.0], // f(+1) = 4b/√5 xzz - b xxx - b/√5 xyy
+    &[0.0, 0.0, SQRT3_2, 0.0, 0.0, 0.0, 0.0, -SQRT3_2, 0.0, 0.0], // f(+2) = sqrt(3)/2 (xxz - yyz)
+    &[F_A, 0.0, 0.0, -F_3A_R5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], // f(+3) = a xxx - 3a/√5 xyy
 ];
 
 /// A contracted shell placed on an atom.
@@ -228,9 +257,20 @@ impl Shell {
         if self.spherical { 2 * self.l + 1 } else { self.n_cartesian() }
     }
 
-    /// Cartesian→output transformation, if the shell is spherical (only d shells).
-    pub fn spherical_transform(&self) -> Option<&'static [[f64; 6]; 5]> {
-        if self.spherical { Some(&CART_TO_SPH_D) } else { None }
+    /// Cartesian→output transformation, if the shell is spherical
+    /// (eq:sph-d for d shells, eq:sph-f for f shells).
+    ///
+    /// # Panics
+    /// If the shell is marked spherical but has no transformation (L other than 2 or 3).
+    pub fn spherical_transform(&self) -> Option<&'static SphericalTransform> {
+        if !self.spherical {
+            return None;
+        }
+        match self.l {
+            2 => Some(CART_TO_SPH_D),
+            3 => Some(CART_TO_SPH_F),
+            l => panic!("no spherical transformation for L = {l}"),
+        }
     }
 }
 
@@ -314,11 +354,11 @@ impl Basis {
 
 /// Applies a Cartesian→spherical transform `t` (rows = output) along `axis` of a
 /// row-major tensor with shape `dims`, updating `dims`.
-pub(crate) fn transform_axis(data: &[f64], dims: &mut [usize], axis: usize, t: &[[f64; 6]; 5]) -> Vec<f64> {
+pub(crate) fn transform_axis(data: &[f64], dims: &mut [usize], axis: usize, t: &SphericalTransform) -> Vec<f64> {
     let outer: usize = dims[..axis].iter().product();
     let inner: usize = dims[axis + 1..].iter().product();
     let nin = dims[axis];
-    debug_assert_eq!(nin, 6);
+    debug_assert!(t.iter().all(|row| row.len() == nin));
     let nout = t.len();
     let mut out = vec![0.0; outer * nout * inner];
     for o in 0..outer {
@@ -342,6 +382,81 @@ pub(crate) fn transform_axis(data: &[f64], dims: &mut [usize], axis: usize, t: &
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One-centre overlap of the normalized Cartesian components of angular momentum `l`
+    /// (common radial factor dropped): ⟨x^p⟩ over the sphere ∝ Π (p_i - 1)!! for even p_i.
+    fn cartesian_angular_overlap(l: usize) -> Vec<Vec<f64>> {
+        let comps = cartesian_components(l);
+        let raw = |p: [usize; 3], q: [usize; 3]| -> f64 {
+            let s = [p[0] + q[0], p[1] + q[1], p[2] + q[2]];
+            if s.iter().any(|x| x % 2 == 1) {
+                return 0.0;
+            }
+            s.iter().map(|&x| odd_double_factorial(x / 2)).product()
+        };
+        comps
+            .iter()
+            .map(|&p| comps.iter().map(|&q| raw(p, q) / (raw(p, p) * raw(q, q)).sqrt()).collect())
+            .collect()
+    }
+
+    /// T S Tᵀ = I for eq:sph-d and eq:sph-f, and the f rows are orthogonal to r²p.
+    #[test]
+    fn spherical_transforms_orthonormal() {
+        for (l, t) in [(2, CART_TO_SPH_D), (3, CART_TO_SPH_F)] {
+            let s = cartesian_angular_overlap(l);
+            let ncart = (l + 1) * (l + 2) / 2;
+            assert_eq!(t.len(), 2 * l + 1);
+            for row in t {
+                assert_eq!(row.len(), ncart);
+            }
+            for (i, ri) in t.iter().enumerate() {
+                for (j, rj) in t.iter().enumerate() {
+                    let mut v = 0.0;
+                    for a in 0..ncart {
+                        for b in 0..ncart {
+                            v += ri[a] * s[a][b] * rj[b];
+                        }
+                    }
+                    let expect = if i == j { 1.0 } else { 0.0 };
+                    assert!((v - expect).abs() < 1e-14, "L={l} (T S Tᵀ)[{i}][{j}] = {v}");
+                }
+            }
+        }
+        // r² x_k = Σ_i x_k x_i² over normalized components: monomial = χ / c_lmn (eq:cart-norm).
+        let comps = cartesian_components(3);
+        let s = cartesian_angular_overlap(3);
+        for k in 0..3 {
+            let v: Vec<f64> = comps
+                .iter()
+                .map(|&p| {
+                    let odd_k = p[k] % 2 == 1 && (0..3).all(|j| j == k || p[j] % 2 == 0);
+                    if odd_k { 1.0 / cartesian_norm(p) } else { 0.0 }
+                })
+                .collect();
+            for (m, row) in CART_TO_SPH_F.iter().enumerate() {
+                let mut ov = 0.0;
+                for a in 0..10 {
+                    for b in 0..10 {
+                        ov += row[a] * s[a][b] * v[b];
+                    }
+                }
+                assert!(ov.abs() < 1e-14, "f({}) not orthogonal to r² p_{k}: {ov}", m as i64 - 3);
+            }
+        }
+    }
+
+    #[test]
+    fn spherical_transform_by_l() {
+        let def = ShellDefinition { l: 3, exponents: vec![1.0], coefficients: vec![1.0] };
+        let f = Shell::new(&def, [0.0; 3], 0, true, 0);
+        assert_eq!(f.n_functions(), 7);
+        assert_eq!(f.spherical_transform().unwrap(), CART_TO_SPH_F);
+        let fc = Shell::new(&def, [0.0; 3], 0, false, 0);
+        assert!(fc.spherical_transform().is_none());
+        let d = Shell::new(&ShellDefinition { l: 2, ..def }, [0.0; 3], 0, true, 0);
+        assert_eq!(d.spherical_transform().unwrap(), CART_TO_SPH_D);
+    }
 
     #[test]
     fn builtin_sets_parse() {

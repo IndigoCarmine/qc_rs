@@ -17,7 +17,7 @@
 //! to the spherical d basis, the density-like matrices are transformed to the
 //! normalized Cartesian basis once (Σ_μν M_μν I_μν = Σ_cd (Tᵀ M T)_cd I^cart_cd with T
 //! the eq:sph-d matrix), which is equivalent because eq:sph-d commutes with the UNCHECKED(Schlegel1995)
-//! derivative.
+//! derivative (likewise eq:sph-f for spherical f shells). UNCHECKED(Schlegel1995)
 //!
 //! Derivative ERIs are never stored: each unique shell quartet (8-fold symmetry,
 //! eq:eri-sym) is contracted with the symmetrized Γ on the fly, using the UNCHECKED(Szabo1996)
@@ -33,7 +33,7 @@
 //! default 1e-7.
 
 use crate::ao_eval::{D_X, eval_ao_shells, hessian_component};
-use crate::basis::{Basis, CART_TO_SPH_D, cartesian_components, cartesian_norm};
+use crate::basis::{Basis, cartesian_components, cartesian_norm};
 use crate::boys::boys;
 use crate::dft::{XcIntegrator, density_on_points, xc_on_points};
 use crate::error::{QcError, Result};
@@ -130,7 +130,7 @@ fn cartesian_offsets(basis: &Basis) -> (Vec<usize>, usize) {
 }
 
 /// Tᵀ M T: a matrix over the basis AOs expressed over normalized Cartesian components
-/// (identity for Cartesian shells, eq:sph-d for spherical d shells).
+/// (identity for Cartesian shells, eq:sph-d / eq:sph-f for spherical d / f shells).
 fn to_cartesian(basis: &Basis, m: &Matrix) -> Matrix {
     let (coff, nc) = cartesian_offsets(basis);
     let n = basis.nao();
@@ -151,7 +151,6 @@ fn to_cartesian(basis: &Basis, m: &Matrix) -> Matrix {
             }
         }
     }
-    debug_assert_eq!(CART_TO_SPH_D.len(), 5);
     t.transpose().matmul(m).matmul(&t)
 }
 

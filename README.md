@@ -14,8 +14,8 @@ Windows・Linux・macOS のどれでも `cargo build` だけでビルドでき�
 - 元素は H–Ar。基底は STO-3G、6-31G、6-31G\*、6-31G\*\*、6-311G、6-311G\*、6-311G\*\*、6-31G(2df,p)、
   6-311G(2df,2pd)（H–Ne のみ）、6-311++G(3df,3pd)（H と Li–Ar、He なし）。名前は大文字小文字を区別せず、`*` は `s` とも書けます
   （`"6-311gss"`）。殻は f まで（g 以上はエラー）。d・f は既定で球面（5d・7f）、`with_cartesian_d(true)` でデカルト（6d・10f）。
-  f 殻を含む計算は、d までに使う専用の速い経路（2電子積分とその勾配の小さい殻の組の計算、格子上の AO の値の計算）を使わず、
-  汎用の経路を通ります（結果は同じで、基底関数あたりの計算が遅くなります）。
+  f 殻を含む殻の組の2電子積分とその勾配、および f 殻の格子上の AO の値は、専用に展開した速い経路ではなく汎用の経路で計算します
+  （結果は同じで、f の部分の計算が遅くなります。s・p・d だけの部分は従来どおりです）。
 - 2電子積分の扱いは2通りあります（`ScfOptions::integral_strategy`、`Calculation::with_integral_strategy`）。
   - **保存法**（`IntegralStrategy::Stored`）：8重対称性と Schwarz 選別を使って独立な積分をすべてメモリに保持します。
     メモリは基底数 N の4乗に比例し（約 N⁴/8 個の倍精度数。N = 256 で 4.3 GB、N = 425 で 33 GB）、
@@ -252,7 +252,7 @@ RHF/6-31G と B3LYP/6-31G のエネルギーと勾配を PySCF の参照値と�
 | CAM-B3LYP 軌道エネルギー・双極子 | 同上 | 4.1e-8・9.5e-9 |
 | CAM-B3LYP 勾配 | 同上 | 1.5e-6 Eh/Bohr（H2CO。他は 4e-8 以下） |
 | CAM-B3LYP 最適化 | H2O（6-31G、PySCF は 99 × 590 格子） | エネルギー 8.4e-9 Eh、距離 9.2e-7 Bohr |
-| RHF 全エネルギー（6-311G\*\* と f を含む基底） | 6：H2O/6-311G\*\*、H2O・歪んだ H2O・HCl の 6-31G(2df,p)、H2O/6-31G(2df,p) のデカルト（6d・10f）、H2O/6-311G(2df,2pd) | 1.4e-12 Eh |
+| RHF 全エネルギー（6-311G\*\* と f を含む基底） | 6：H2O/6-311G\*\*、H2O・歪んだ H2O・HCl の 6-31G(2df,p)、H2O/6-31G(2df,p) のデカルト（6d・10f）、H2O/6-311G(2df,2pd) | 1.4e-12 Eh（`tests/gradient_pyscf.rs` の HCl。`tests/rhf_pyscf.rs` の一点計算では 7.4e-13） |
 | RHF 勾配（同上） | 同上 | 4.9e-10 Eh/Bohr |
 | B3LYP・CAM-B3LYP 全エネルギー（f を含む基底） | H2O/6-31G(2df,p)（細かい格子） | 2.7e-9 Eh |
 | B3LYP・CAM-B3LYP 勾配（同上） | 同上 | 4.3e-8 Eh/Bohr |

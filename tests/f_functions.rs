@@ -251,7 +251,7 @@ fn f_functions_contribute() {
 
 /// Analytic RHF and B3LYP gradients with f functions vs central differences of the
 /// energy (h = 1e-3 Bohr). B3LYP uses the fine grid, which keeps the neglected
-/// grid-weight derivative (theory.typ section 10.5) below the tolerance here.
+/// grid-weight derivative (theory.typ eq:xc-grad) below the tolerance here.
 /// Observed (water): 1.5e-7 for all three, the O(h²) truncation error.
 #[test]
 fn f_gradients_match_finite_differences() {

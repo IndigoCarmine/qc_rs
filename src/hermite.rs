@@ -1,4 +1,4 @@
-//! Primitive-level McMurchie–Davidson machinery (theory.typ sections 3–5).
+//! Primitive-level McMurchie–Davidson machinery (theory.typ sec:hermite, sec:oneel, sec:eri).
 //!
 //! Everything here works on *unnormalized* primitive Cartesian Gaussians
 //! g_lmn(r; a, A) = x_A^l y_A^m z_A^n exp(-a r_A^2) (theory.typ eq:prim) with UNCHECKED(Helgaker2000)

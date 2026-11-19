@@ -113,7 +113,7 @@ fn gradients_match_pyscf() {
 /// Central differences of the energy (h = 1e-3 Bohr) on the asymmetric h2o_dist geometry.
 ///
 /// For DFT the grid moves with the atoms in the finite differences, while the analytic
-/// gradient neglects the grid-weight derivatives (theory.typ section 10.5); the
+/// gradient neglects the grid-weight derivatives (theory.typ eq:xc-grad); the
 /// difference is reported for the default and the fine grid, together with the
 /// translational non-invariance of the analytic DFT gradient, which has the same origin.
 #[test]
@@ -167,7 +167,7 @@ fn gradients_match_finite_differences() {
 /// Translational invariance of the CAM-B3LYP gradient (h2o_dist/6-31G*): every term
 /// except E_xc^(X) sums to zero over the atoms on its own, the attenuated two-electron
 /// term (eq:cam-grad) included; the E_xc^(X) term and hence the total only to grid
-/// accuracy (theory.typ section 10.5).
+/// accuracy (theory.typ eq:xc-grad).
 #[test]
 fn cam_b3lyp_gradient_translational_invariance() {
     let reference = load_reference();

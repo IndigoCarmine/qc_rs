@@ -26,7 +26,7 @@ fn distances(mol: &Molecule) -> Vec<Vec<f64>> {
         .collect()
 }
 
-/// Convergence well beyond the defaults of theory.typ section 11 (all four thresholds
+/// Convergence well beyond the defaults of theory.typ sec:opt (all four thresholds
 /// 100× tighter: max|g| < 4.5e-6 Hartree/Bohr), since PySCF/geomeTRIC was converged to
 /// max|g| ~ 1e-7–1e-6.
 fn tight_settings() -> OptimizerSettings {

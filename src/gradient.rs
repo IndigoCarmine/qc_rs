@@ -1,5 +1,5 @@
 //! Analytic nuclear gradients dE/dR of closed-shell RHF and RKS energies
-//! (theory.typ section 10, eq:grad). UNCHECKED(Pulay1969)
+//! (theory.typ sec:grad, eq:grad). UNCHECKED(Pulay1969)
 //!
 //! The gradient is assembled term by term as in theory.typ eq:grad:
 //!
@@ -1038,7 +1038,7 @@ pub fn two_electron_gradient(
 
 /// E_xc^(X) of theory.typ eq:xc-grad for density `p` on the grid of `xc` (whose
 /// basis must be `basis`). Grid-weight derivatives are neglected (theory.typ
-/// section 10.5), so the result is not translationally invariant to grid accuracy.
+/// eq:xc-grad), so the result is not translationally invariant to grid accuracy.
 ///
 /// Per grid block, with a_g = w_g v_ρ, b_g = 2 w_g v_σ ∇ρ, t_μ = Σ_ν P_μν χ_ν and
 /// u_μ = Σ_ν P_μν (b·∇χ_ν), the contribution of AO μ (on atom A) is

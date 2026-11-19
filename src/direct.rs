@@ -634,7 +634,7 @@ pub struct DirectJk {
     pairs: Vec<DirectPair>,
     /// Cartesian Schwarz factors Q_ab (theory.typ eq:schwarz), by `pair_index`.
     q: Vec<f64>,
-    /// Basis AO μ = Σ w χ_c over normalized Cartesian components c (eq:sph-d).
+    /// Basis AO μ = Σ w χ_c over normalized Cartesian components c (eq:sph-d, eq:sph-f).
     to_cart: Vec<Vec<(usize, f64)>>,
     erf: Option<ErfKernel>,
     threshold: f64,

@@ -49,7 +49,7 @@ const BETA_B88: f64 = 0.0042;
 pub(super) const SERIES_SWITCH: f64 = 0.5;
 
 /// Below a = 1/(2√700), i.e. 1/(4a²) > 700, b = −1 and erf(1/(2a)) = 1 to double
-/// precision (theory.typ section 9, short-range B88).
+/// precision (theory.typ eq:cam-att, short-range B88).
 const SMALL_A_EXPONENT: f64 = 700.0;
 
 /// 1 − A(a) by eq:cam-att (`series = false`) or by the series eq:cam-series

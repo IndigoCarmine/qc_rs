@@ -1,5 +1,5 @@
 //! Closed-shell SCF (RHF now; RKS via a pluggable exchange-correlation term).
-//! theory.typ sections 6–7.
+//! theory.typ sec:rhf, sec:rks.
 
 use crate::basis::Basis;
 use crate::direct::{DirectBuildStatistics, DirectJk};
@@ -82,7 +82,11 @@ pub enum IntegralStrategy {
 /// well as smaller: N = 168 took 5.4 s direct against 10.0 s stored (24 threads).
 pub const DEFAULT_ERI_MEMORY_BUDGET: u64 = 1 << 29;
 
-/// SCF settings (defaults from theory.typ section 6.3).
+/// SCF settings. Defaults from theory.typ: `max_iterations`, `energy_tolerance` and
+/// `error_tolerance` from sec:scf-procedure; `diis_size` from eq:diis;
+/// `schwarz_threshold` from eq:schwarz; `linear_dependence_threshold` from eq:orth;
+/// `direct_threshold`, `incremental_fock`, `full_rebuild_interval` and
+/// `eri_memory_budget` from sec:direct.
 #[derive(Debug, Clone)]
 pub struct ScfOptions {
     /// Maximum number of iterations.

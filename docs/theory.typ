@@ -1,4 +1,4 @@
-// qc_rs 理論仕様書 — 実装はこの文書の式番号を参照する
+// qc_rs 理論仕様書 — 実装のコメントはこの文書の式ラベル（eq:…、sec:…）を参照する
 #set document(title: "qc_rs 理論仕様書")
 #set page(paper: "a4", margin: (x: 22mm, y: 24mm), numbering: "1")
 #set text(lang: "ja", font: ("New Computer Modern", "Yu Mincho", "MS Mincho"), size: 10pt)
@@ -17,7 +17,7 @@
 #align(center)[
   #text(size: 17pt, weight: "bold")[qc_rs 理論仕様書] \
   #v(2mm)
-  閉殻 Hartree–Fock / Kohn–Sham DFT の1点エネルギー・解析的勾配・構造最適化
+  閉殻 Hartree–Fock / Kohn–Sham DFT の1点エネルギー・解析的勾配・構造最適化・分散補正 DFT-D3・調和振動数・IR 強度・熱化学
 ]
 
 #outline(depth: 2)
@@ -53,7 +53,7 @@ $ g_(l m n)(vb(r); a, vb(A)) = x_A^l thin y_A^m thin z_A^n thin e^(-a r_A^2), qu
 
 $ N(a; l, m, n) = (2a / pi)^(3 slash 4) sqrt((4a)^(l+m+n) / ((2l-1)!! (2m-1)!! (2n-1)!!)) $ <eq:prim-norm>
 
-== 短縮殻
+== 短縮殻 <sec:contracted>
 
 角運動量 $L$ の殻は指数 $a_k$ と短縮係数 $d_k$（$k = 1 ... K$）を持つ。基底ファイルの $d_k$ は
 *規格化された原始関数* に対する係数である。殻の成分 $(l, m, n)$ の基底関数は
@@ -114,7 +114,7 @@ s, p 殻はデカルトのまま。積分・微分積分はデカルト成分で
 $(2L + 1) times (L + 1)(L + 2) slash 2$ 行列を各添字に掛ける。基底殻は $L <= 3$ を対象とするが、
 原始積分の漸化式は任意の $L$ で動くように実装する（勾配で $L + 1 = 4$ まで必要になる）。
 
-== 基底ファイル（Gaussian94 形式）
+== 基底ファイル（Gaussian94 形式） <sec:basis-file>
 
 `data/basis/*.gbs`（Basis Set Exchange より取得）。`!` で始まる行はコメント。元素ごとに
 `記号 0` の行で始まり `****` で終わる。殻は `種類 原始数 スケール` の行（種類は `S`, `P`, `D`, `F`, `SP`）に
@@ -295,7 +295,7 @@ $ delta = (d_(l+1) - d_l) / (2 e_l), quad
 各回転を $Q$ に右から掛けていき、すべての $e$ が 0 になったときの $d$ が固有値、$Q$ の列が固有ベクトルである。
 1つの固有値あたり 50 回の掃引で収束しなければエラーとする。
 
-== SCF 手順
+== SCF 手順 <sec:scf-procedure>
 
 + $S, T, V$、ERI（保存法の場合。直接法は @sec:direct）、$X$ を計算する。
 + 初期値：原子密度の重ね合わせ（@sec:sad）で $P$ を作る。前の構造の密度行列などが与えられていればそれを使う。

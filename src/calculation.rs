@@ -414,7 +414,7 @@ impl Calculation {
         Ok(FrequencyResult { hessian, analysis, ir_intensities, thermo, max_abs_gradient })
     }
 
-    /// Geometry optimization (theory.typ section 11) starting from this calculation's
+    /// Geometry optimization (theory.typ sec:opt) starting from this calculation's
     /// molecule, of the total energy including the dispersion correction if any
     /// (eq:d3-total). The SCF at each new geometry starts from the previous density.
     pub fn optimize(&self, settings: &OptimizerSettings) -> Result<GeometryOptimization> {

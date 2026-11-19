@@ -83,7 +83,7 @@ impl Dual {
     }
 
     /// erf x = (2x/√π) F₀(x²) from the Boys function; erf'(x) = (2/√π) e^{−x²}.
-    /// theory.typ section 9 (short-range B88)
+    /// theory.typ eq:cam-att (short-range B88)
     #[inline]
     pub fn erf(self) -> Self {
         self.chain(erf(self.v), 2.0 / PI.sqrt() * (-self.v * self.v).exp())

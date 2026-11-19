@@ -1,5 +1,5 @@
 //! Geometry optimization: quasi-Newton BFGS with a trust radius in Cartesian
-//! coordinates (theory.typ section 11, eq:bfgs). UNCHECKED(Fletcher1970)
+//! coordinates (theory.typ sec:opt, eq:bfgs). UNCHECKED(Fletcher1970)
 //!
 //! [`bfgs_minimize`] is generic over a function returning (energy, gradient) at a
 //! coordinate vector, so it can be tested on model functions; the molecular driver is
@@ -8,7 +8,7 @@
 use crate::error::{QcError, Result};
 use crate::linalg::{Matrix, solve};
 
-/// Settings of the optimizer. Defaults are those of theory.typ section 11.
+/// Settings of the optimizer. Defaults are those of theory.typ sec:opt.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OptimizerSettings {
     /// Convergence: max |g_i| (Hartree/Bohr).
@@ -122,7 +122,7 @@ fn norm(v: &[f64]) -> f64 {
 }
 
 /// Minimizes `f` (returning energy and gradient) from `x0` with the BFGS procedure
-/// of theory.typ section 11:
+/// of theory.typ sec:opt:
 ///
 /// 1. H₀ = `initial_hessian`·I, Δ = `initial_trust_radius`.
 /// 2. s = −H⁻¹g (linear solve), scaled down to length Δ if longer.

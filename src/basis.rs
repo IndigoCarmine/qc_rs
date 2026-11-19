@@ -1,5 +1,5 @@
 //! Gaussian basis sets: Gaussian94 parser, contracted shells, normalization,
-//! spherical d transformation and AO bookkeeping (theory.typ section 2).
+//! spherical d and f transformations and AO bookkeeping (theory.typ section 2).
 
 use crate::error::{QcError, Result};
 use crate::molecule::{Molecule, atomic_number, element_symbol};
@@ -13,9 +13,32 @@ const STO_3G: &str = include_str!("../data/basis/sto-3g.gbs");
 const B6_31G: &str = include_str!("../data/basis/6-31g.gbs");
 const B6_31GS: &str = include_str!("../data/basis/6-31gs.gbs");
 const B6_31GSS: &str = include_str!("../data/basis/6-31gss.gbs");
+// 6-311G family and the sets with f functions, likewise unchecked (full reference list in
+// data/basis/README.md): UNCHECKED(Krishnan1980) UNCHECKED(McLean1980) UNCHECKED(Frisch1984)
+// UNCHECKED(Clark1983)
+const B6_311G: &str = include_str!("../data/basis/6-311g.gbs");
+const B6_311GS: &str = include_str!("../data/basis/6-311gs.gbs");
+const B6_311GSS: &str = include_str!("../data/basis/6-311gss.gbs");
+const B6_31G_2DF_P: &str = include_str!("../data/basis/6-31g_2df_p.gbs");
+const B6_311G_2DF_2PD: &str = include_str!("../data/basis/6-311g_2df_2pd.gbs");
+const B6_311PPG_3DF_3PD: &str = include_str!("../data/basis/6-311ppg_3df_3pd.gbs");
+
+/// Highest shell angular momentum accepted by [`Basis::new`] (f functions).
+const MAX_SHELL_L: usize = 3;
 
 /// Names of the built-in basis sets.
-pub const BUILTIN_BASIS_SETS: [&str; 4] = ["sto-3g", "6-31g", "6-31g*", "6-31g**"];
+pub const BUILTIN_BASIS_SETS: [&str; 10] = [
+    "sto-3g",
+    "6-31g",
+    "6-31g*",
+    "6-31g**",
+    "6-311g",
+    "6-311g*",
+    "6-311g**",
+    "6-31g(2df,p)",
+    "6-311g(2df,2pd)",
+    "6-311++g(3df,3pd)",
+];
 
 /// One contracted shell as written in a basis file (coefficients refer to normalized primitives).
 #[derive(Debug, Clone, PartialEq)]
@@ -37,13 +60,21 @@ pub struct BasisSetDefinition {
 }
 
 impl BasisSetDefinition {
-    /// One of the embedded basis sets: "sto-3g", "6-31g", "6-31g*", "6-31g**" (case-insensitive).
+    /// One of the embedded basis sets (case-insensitive): "sto-3g", "6-31g", "6-31g*",
+    /// "6-31g**", "6-311g", "6-311g*", "6-311g**" (H–Ar); "6-31g(2df,p)" (H–Ar);
+    /// "6-311g(2df,2pd)" (H–Ne); "6-311++g(3df,3pd)" (H, Li–Ar). "s" may replace "*".
     pub fn builtin(name: &str) -> Result<Self> {
         let text = match name.to_ascii_lowercase().as_str() {
             "sto-3g" => STO_3G,
             "6-31g" => B6_31G,
             "6-31g*" | "6-31gs" => B6_31GS,
             "6-31g**" | "6-31gss" => B6_31GSS,
+            "6-311g" => B6_311G,
+            "6-311g*" | "6-311gs" => B6_311GS,
+            "6-311g**" | "6-311gss" => B6_311GSS,
+            "6-31g(2df,p)" => B6_31G_2DF_P,
+            "6-311g(2df,2pd)" => B6_311G_2DF_2PD,
+            "6-311++g(3df,3pd)" => B6_311PPG_3DF_3PD,
             _ => return Err(QcError::InvalidInput(format!("unknown basis set '{name}'"))),
         };
         Self::from_gbs(name, text)
@@ -219,7 +250,7 @@ pub struct Shell {
     /// Normalized contraction coefficients d̃_k (theory.typ eq:contr-norm); multiply UNCHECKED(Helgaker2000)
     /// by c_lmn (eq:cart-norm) for each Cartesian component.
     pub coefficients: Vec<f64>,
-    /// Whether the shell uses spherical (5d) instead of Cartesian components.
+    /// Whether the shell uses spherical (5d, 7f) instead of Cartesian components.
     pub spherical: bool,
     /// Index of the first AO of this shell.
     pub ao_offset: usize,
@@ -227,8 +258,13 @@ pub struct Shell {
 
 impl Shell {
     /// Builds a shell from file data, applying theory.typ eq:contr-norm.
+    ///
+    /// # Panics
+    /// If `spherical` is set for an angular momentum without a spherical
+    /// transformation (L other than 2 or 3; s and p shells are always Cartesian).
     pub fn new(def: &ShellDefinition, center: [f64; 3], atom: usize, spherical: bool, ao_offset: usize) -> Self {
         let l = def.l;
+        assert!(!spherical || matches!(l, 2 | 3), "no spherical transformation for L = {l}");
         let a = &def.exponents;
         let d = &def.coefficients;
         // theory.typ eq:contr-norm
@@ -252,7 +288,7 @@ impl Shell {
         (self.l + 1) * (self.l + 2) / 2
     }
 
-    /// Number of basis functions (5 for a spherical d shell).
+    /// Number of basis functions (5 for a spherical d shell, 7 for a spherical f shell).
     pub fn n_functions(&self) -> usize {
         if self.spherical { 2 * self.l + 1 } else { self.n_cartesian() }
     }
@@ -277,7 +313,8 @@ impl Shell {
 /// Options for building a [`Basis`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct BasisOptions {
-    /// Use 6 Cartesian d functions instead of 5 spherical ones.
+    /// Use Cartesian d and f functions (6d, 10f) instead of spherical ones (5d, 7f),
+    /// like PySCF's `cart=True`. The name is kept from when shells stopped at d.
     pub cartesian_d: bool,
 }
 
@@ -299,10 +336,11 @@ impl Basis {
                 element: element_symbol(atom.z).unwrap_or("?").to_string(),
             })?;
             for sd in defs {
-                if sd.l > 2 {
+                if sd.l > MAX_SHELL_L {
                     return Err(QcError::UnsupportedAngularMomentum(sd.l));
                 }
-                let spherical = sd.l == 2 && !options.cartesian_d;
+                // eq:sph-d, eq:sph-f; s and p shells stay Cartesian.
+                let spherical = sd.l >= 2 && !options.cartesian_d;
                 let sh = Shell::new(sd, atom.position, ia, spherical, offset);
                 offset += sh.n_functions();
                 shells.push(sh);
@@ -311,7 +349,7 @@ impl Basis {
         Ok(Basis { shells, nao: offset })
     }
 
-    /// Convenience: built-in basis by name with default options (spherical d).
+    /// Convenience: built-in basis by name with default options (spherical d and f).
     pub fn from_name(mol: &Molecule, name: &str) -> Result<Self> {
         Basis::new(mol, &BasisSetDefinition::builtin(name)?, BasisOptions::default())
     }
@@ -460,16 +498,77 @@ mod tests {
 
     #[test]
     fn builtin_sets_parse() {
+        let h_ar: Vec<u32> = (1..=18).collect();
+        let h_ne: Vec<u32> = (1..=10).collect();
+        let h_li_ar: Vec<u32> = std::iter::once(1).chain(3..=18).collect();
+        let elements = |name: &str| -> &[u32] {
+            match name {
+                "6-311g(2df,2pd)" => &h_ne,
+                "6-311++g(3df,3pd)" => &h_li_ar,
+                _ => &h_ar,
+            }
+        };
         for name in BUILTIN_BASIS_SETS {
             let b = BasisSetDefinition::builtin(name).unwrap();
+            let expect = elements(name);
             for z in 1..=18 {
-                assert!(b.shells_for(z).is_some(), "{name} lacks Z={z}");
+                assert_eq!(b.shells_for(z).is_some(), expect.contains(&z), "{name}, Z={z}");
             }
+            // f shells only in the sets named with "f", and nothing above f.
+            let max_l = expect.iter().flat_map(|&z| b.shells_for(z).unwrap()).map(|s| s.l).max().unwrap();
+            assert_eq!(max_l, if name.contains('f') { 3 } else if name.contains('*') { 2 } else { 1 }, "{name}");
         }
-        let b = BasisSetDefinition::builtin("6-31g*").unwrap();
+        let l_of = |name: &str, z: u32| -> Vec<usize> {
+            BasisSetDefinition::builtin(name).unwrap().shells_for(z).unwrap().iter().map(|s| s.l).collect()
+        };
         // O: S6, SP3 -> S3 + P3, SP1 -> S1 + P1, D1
-        let o: Vec<usize> = b.shells_for(8).unwrap().iter().map(|s| s.l).collect();
-        assert_eq!(o, vec![0, 0, 1, 0, 1, 2]);
+        assert_eq!(l_of("6-31g*", 8), vec![0, 0, 1, 0, 1, 2]);
+        // Shells are kept in file order, whatever it is.
+        // 6-31G(2df,p) H: S3, S1, P1, P1 (two P shells).
+        assert_eq!(l_of("6-31g(2df,p)", 1), vec![0, 0, 1, 1]);
+        // 6-311++G(3df,3pd) Al: S×6, P×4, SP, P, D×3, F.
+        assert_eq!(l_of("6-311++g(3df,3pd)", 13), vec![0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 1, 1, 2, 2, 2, 3]);
+        // 6-311G(2df,2pd) O: S, SP×3, D×2, F.
+        assert_eq!(l_of("6-311g(2df,2pd)", 8), vec![0, 0, 1, 0, 1, 0, 1, 2, 2, 3]);
+        // Aliases and case.
+        for (alias, name) in [("6-311gs", "6-311g*"), ("6-311GSS", "6-311g**"), ("6-31G(2DF,P)", "6-31g(2df,p)")] {
+            assert_eq!(
+                BasisSetDefinition::builtin(alias).unwrap().shells_for(8),
+                BasisSetDefinition::builtin(name).unwrap().shells_for(8)
+            );
+        }
+    }
+
+    #[test]
+    fn angular_momentum_limit() {
+        let mol = Molecule::from_symbols(&["H"], &[[0.0; 3]], crate::molecule::Unit::Bohr, 0).unwrap();
+        let gbs = |kind: &str| format!("H 0
+{kind} 1 1.00
+ 1.0 1.0
+****
+");
+        for cart in [false, true] {
+            let opts = BasisOptions { cartesian_d: cart };
+            let f = Basis::new(&mol, &BasisSetDefinition::from_gbs("f", &gbs("F")).unwrap(), opts).unwrap();
+            assert_eq!(f.nao(), if cart { 10 } else { 7 });
+            assert_eq!(f.shells()[0].spherical, !cart);
+            let g = Basis::new(&mol, &BasisSetDefinition::from_gbs("g", &gbs("G")).unwrap(), opts);
+            assert!(matches!(g, Err(QcError::UnsupportedAngularMomentum(4))));
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "no spherical transformation for L = 1")]
+    fn spherical_p_shell_rejected() {
+        let def = ShellDefinition { l: 1, exponents: vec![1.0], coefficients: vec![1.0] };
+        Shell::new(&def, [0.0; 3], 0, true, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "no spherical transformation for L = 4")]
+    fn spherical_g_shell_rejected() {
+        let def = ShellDefinition { l: 4, exponents: vec![1.0], coefficients: vec![1.0] };
+        Shell::new(&def, [0.0; 3], 0, true, 0);
     }
 
     #[test]

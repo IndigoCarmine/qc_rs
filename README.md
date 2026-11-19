@@ -11,7 +11,9 @@ Windows・Linux・macOS のどれでも `cargo build` だけでビルドでき�
 ## できること・制限
 
 - 閉殻（電子数が偶数、RHF/RKS）のみ。開殻、ECP はありません。
-- 元素は H–Ar。基底は STO-3G、6-31G、6-31G\*、6-31G\*\*（殻は d まで、d は既定で球面 5 成分、デカルト 6 成分も可）。
+- 元素は H–Ar。基底は STO-3G、6-31G、6-31G\*、6-31G\*\*、6-311G、6-311G\*、6-311G\*\*、6-31G(2df,p)、
+  6-311G(2df,2pd)（H–Ne のみ）、6-311++G(3df,3pd)（H と Li–Ar、He なし）。名前は大文字小文字を区別せず、`*` は `s` とも書けます
+  （`"6-311gss"`）。殻は f まで（g 以上はエラー）。d・f は既定で球面（5d・7f）、`with_cartesian_d(true)` でデカルト（6d・10f）。
 - 2電子積分の扱いは2通りあります（`ScfOptions::integral_strategy`、`Calculation::with_integral_strategy`）。
   - **保存法**（`IntegralStrategy::Stored`）：8重対称性と Schwarz 選別を使って独立な積分をすべてメモリに保持します。
     メモリは基底数 N の4乗に比例し（約 N⁴/8 個の倍精度数。N = 256 で 4.3 GB、N = 425 で 33 GB）、
@@ -353,6 +355,9 @@ Helgaker, Jørgensen & Olsen *Molecular Electronic-Structure Theory*（Wiley, 20
 - R. Ditchfield, W. J. Hehre, J. A. Pople, *J. Chem. Phys.* **54**, 724 (1971); W. J. Hehre, R. Ditchfield, J. A. Pople, *J. Chem. Phys.* **56**, 2257 (1972) — 分割原子価基底 6-31G。
 - P. C. Hariharan, J. A. Pople, *Theor. Chim. Acta* **28**, 213 (1973) — 分極関数（6-31G\*、6-31G\*\*）。
 - M. M. Francl ほか, *J. Chem. Phys.* **77**, 3654 (1982) — 第3周期元素（Na–Ar）の 6-31G\*。
+- R. Krishnan, J. S. Binkley, R. Seeger, J. A. Pople, *J. Chem. Phys.* **72**, 650 (1980); A. D. McLean, G. S. Chandler, *J. Chem. Phys.* **72**, 5639 (1980) — 6-311G 系。
+- M. J. Frisch, J. A. Pople, J. S. Binkley, *J. Chem. Phys.* **80**, 3265 (1984) — f 関数と多重分極関数（6-31G(2df,p)、6-311G(2df,2pd)、6-311++G(3df,3pd)）。
+- T. Clark ほか, *J. Comput. Chem.* **4**, 294 (1983) — 分散関数（6-311++G(3df,3pd)）。元素ごとの全文献は [data/basis/README.md](data/basis/README.md)。
 - B. P. Pritchard ほか, *J. Chem. Inf. Model.* **59**, 4814 (2019) — Basis Set Exchange。
 
 **検証に使ったソフトウェア**

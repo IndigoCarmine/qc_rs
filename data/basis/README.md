@@ -16,11 +16,13 @@ and are attributed to, the Basis Set Exchange:
   `https://www.basissetexchange.org/api/basis/<name>/format/gaussian94/?elements=1-18`
   with the Basis Set Exchange names `6-311g`, `6-311g_st_` and `6-311g_st__st_`,
   unmodified. Their headers read version 0.12, "Data from the Original Basis Set
-  Exchange". They contain S, P, D and SP shells only (no F shells).
+  Exchange". 6-311G contains S, P and SP shells; 6-311G* and 6-311G** add D
+  shells. None of the three has F shells.
 - Basis sets with f functions, downloaded on 2026-11-19 in the same way and
   unmodified. 6-311G(2df,2p) was the set first planned, but the Basis Set Exchange
   has no basis set of that name, so these three were taken instead. All three
-  headers read version 0.12, "Data from the Original Basis Set Exchange".
+  headers read version 0.12, "Data from the Original Basis Set Exchange" (the
+  6-31G(2df,p) header writes "original" in lower case).
   - `6-31g_2df_p.gbs` (6-31G(2df,p), BSE name `6-31g(2df,p)`, `?elements=1-18`):
     elements H–Ar. Shells S, P, D, SP and F; F shells on Li–Ar. In these data
     H and He carry two P shells.
@@ -95,5 +97,4 @@ in those papers by this project.
 
 Note for binary distributions: the library embeds the text of these files at
 compile time (`include_str!` in `src/basis.rs`), so a compiled program contains
-the data and should carry this attribution. (The 6-311G files and the files with
-f functions are not embedded yet.)
+the data and should carry this attribution. All files listed above are embedded.

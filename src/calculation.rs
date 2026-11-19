@@ -190,7 +190,9 @@ pub struct GeometryOptimization {
 impl Calculation {
     /// `method` is "hf" or a functional name accepted by [`Functional::from_name`]
     /// (e.g. "b3lyp", "blyp", "svwn5", "cam-b3lyp"); `basis` is a built-in basis set name
-    /// ("sto-3g", "6-31g", "6-31g*", "6-31g**"). Spherical d functions, the default DFT
+    /// (see [`BasisSetDefinition::builtin`]: "sto-3g", "6-31g", "6-31g*", "6-31g**",
+    /// "6-311g", "6-311g*", "6-311g**", "6-31g(2df,p)", "6-311g(2df,2pd)",
+    /// "6-311++g(3df,3pd)"). Spherical d and f functions, the default DFT
     /// grid of theory.typ `<sec:rks>` ("既定の格子"), default SCF options and no dispersion
     /// correction.
     pub fn new(molecule: &Molecule, method: &str, basis: &str) -> Result<Self> {
@@ -207,7 +209,7 @@ impl Calculation {
         Ok(calc)
     }
 
-    /// Uses 6 Cartesian instead of 5 spherical d functions.
+    /// Uses Cartesian d and f functions (6d, 10f) instead of spherical ones (5d, 7f).
     pub fn with_cartesian_d(mut self, cartesian: bool) -> Self {
         self.basis_options.cartesian_d = cartesian;
         self

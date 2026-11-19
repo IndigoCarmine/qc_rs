@@ -170,6 +170,10 @@ CIAAW2013 の DOI は Crossref で著者・題名・巻・ページを確認し�
 | Hehre1972 | W. J. Hehre, R. Ditchfield, J. A. Pople, *J. Chem. Phys.* **56**, 2257 (1972) | 10.1063/1.1677527 | `hehre1972_631g.pdf` | 6-31G の指数と係数 | なし |
 | Hariharan1973 | P. C. Hariharan, J. A. Pople, *Theor. Chim. Acta* **28**, 213 (1973) | 10.1007/BF00533485 | `hariharan1973.pdf` | 分極関数の指数（6-31G\*、6-31G\*\*） | なし |
 | Francl1982 | M. M. Francl ほか, *J. Chem. Phys.* **77**, 3654 (1982) | 10.1063/1.444267 | `francl1982.pdf` | 第3周期元素の 6-31G\* | なし |
+| Krishnan1980 | R. Krishnan, J. S. Binkley, R. Seeger, J. A. Pople, *J. Chem. Phys.* **72**, 650 (1980) | 10.1063/1.438955 | `krishnan1980.pdf` | 6-311G、6-311G\*、6-311G\*\*（H、Li–Ne） | なし |
+| McLean1980 | A. D. McLean, G. S. Chandler, *J. Chem. Phys.* **72**, 5639 (1980) | 10.1063/1.438980 | `mclean1980.pdf` | 6-311G（Na–Ar） | なし |
+| Frisch1984 | M. J. Frisch, J. A. Pople, J. S. Binkley, *J. Chem. Phys.* **80**, 3265 (1984) | 10.1063/1.447079 | `frisch1984.pdf` | 多重分極関数と f 関数（6-31G(2df,p)、6-311G(2df,2pd)、6-311++G(3df,3pd)） | なし |
+| Clark1983 | T. Clark, J. Chandrasekhar, G. W. Spitznagel, P. v. R. Schleyer, *J. Comput. Chem.* **4**, 294 (1983) | 10.1002/jcc.540040303 | `clark1983.pdf` | 分散関数（6-311++G(3df,3pd) の H、Li–F） | なし |
 
 ### 定数
 

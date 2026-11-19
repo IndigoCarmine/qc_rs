@@ -6,6 +6,9 @@ use crate::molecule::{Molecule, atomic_number, element_symbol};
 use std::collections::HashMap;
 use std::f64::consts::PI;
 
+// Basis-set data as downloaded from Basis Set Exchange; the exponents and coefficients
+// have not been compared with the original papers: UNCHECKED(Hehre1969)
+// UNCHECKED(Hehre1972) UNCHECKED(Hariharan1973) UNCHECKED(Francl1982)
 const STO_3G: &str = include_str!("../data/basis/sto-3g.gbs");
 const B6_31G: &str = include_str!("../data/basis/6-31g.gbs");
 const B6_31GS: &str = include_str!("../data/basis/6-31gs.gbs");
@@ -136,14 +139,14 @@ pub fn odd_double_factorial(k: usize) -> f64 {
     (1..=k).fold(1.0, |acc, i| acc * (2 * i - 1) as f64)
 }
 
-/// Normalization constant N(a; l, m, n) of a primitive. theory.typ eq:prim-norm
+/// Normalization constant N(a; l, m, n) of a primitive. theory.typ eq:prim-norm UNCHECKED(Helgaker2000)
 pub fn primitive_norm(a: f64, lmn: [usize; 3]) -> f64 {
     let l = lmn[0] + lmn[1] + lmn[2];
     let den = odd_double_factorial(lmn[0]) * odd_double_factorial(lmn[1]) * odd_double_factorial(lmn[2]);
     (2.0 * a / PI).powf(0.75) * ((4.0 * a).powi(l as i32) / den).sqrt()
 }
 
-/// Relative Cartesian normalization c_lmn. theory.typ eq:cart-norm
+/// Relative Cartesian normalization c_lmn. theory.typ eq:cart-norm UNCHECKED(Helgaker2000)
 pub fn cartesian_norm(lmn: [usize; 3]) -> f64 {
     let l = lmn[0] + lmn[1] + lmn[2];
     let den = odd_double_factorial(lmn[0]) * odd_double_factorial(lmn[1]) * odd_double_factorial(lmn[2]);
@@ -164,7 +167,7 @@ pub fn cartesian_components(l: usize) -> Vec<[usize; 3]> {
 const SQRT3_2: f64 = 0.866_025_403_784_438_6;
 
 /// 5×6 Cartesian→spherical d transformation, rows m = -2..2, columns xx,xy,xz,yy,yz,zz.
-/// theory.typ eq:sph-d
+/// theory.typ eq:sph-d UNCHECKED(Schlegel1995)
 pub const CART_TO_SPH_D: [[f64; 6]; 5] = [
     [0.0, 1.0, 0.0, 0.0, 0.0, 0.0],      // d(-2) = xy
     [0.0, 0.0, 0.0, 0.0, 1.0, 0.0],      // d(-1) = yz
@@ -184,7 +187,7 @@ pub struct Shell {
     pub atom: usize,
     /// Primitive exponents a_k.
     pub exponents: Vec<f64>,
-    /// Normalized contraction coefficients d̃_k (theory.typ eq:contr-norm); multiply
+    /// Normalized contraction coefficients d̃_k (theory.typ eq:contr-norm); multiply UNCHECKED(Helgaker2000)
     /// by c_lmn (eq:cart-norm) for each Cartesian component.
     pub coefficients: Vec<f64>,
     /// Whether the shell uses spherical (5d) instead of Cartesian components.

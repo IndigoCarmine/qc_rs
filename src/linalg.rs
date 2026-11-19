@@ -1,7 +1,14 @@
-//! Small dense linear algebra: row-major matrix, Jacobi symmetric eigensolver, linear solve.
+//! Small dense linear algebra: row-major matrix, symmetric eigensolver, linear solve.
 
 use crate::error::{QcError, Result};
 use std::ops::{Add, Index, IndexMut, Mul, Sub};
+
+/// Multiply-adds below which `Matrix::matmul` runs serially (thread start-up would cost
+/// more than the product). Either path computes every row identically.
+const MATMUL_PARALLEL_MIN_WORK: usize = 1 << 18;
+
+/// Output rows handed to one rayon task in `Matrix::matmul`.
+const MATMUL_ROWS_PER_TASK: usize = 4;
 
 /// Dense row-major matrix of `f64`.
 #[derive(Debug, Clone, PartialEq)]
@@ -71,11 +78,19 @@ impl Matrix {
     }
 
     /// Matrix product `self * other`.
+    ///
+    /// Each output row is accumulated by one task in the same order (k = 0, 1, …), so the
+    /// result does not depend on the number of threads or on whether the product runs in
+    /// parallel at all.
     pub fn matmul(&self, other: &Matrix) -> Matrix {
+        use rayon::prelude::*;
+
         assert_eq!(self.cols, other.rows, "matmul shape mismatch");
         let mut out = Matrix::zeros(self.rows, other.cols);
-        for i in 0..self.rows {
-            let orow = &mut out.data[i * other.cols..(i + 1) * other.cols];
+        if other.cols == 0 {
+            return out;
+        }
+        let row = |(i, orow): (usize, &mut [f64])| {
             for k in 0..self.cols {
                 let a = self.data[i * self.cols + k];
                 if a == 0.0 {
@@ -86,6 +101,12 @@ impl Matrix {
                     *o += a * b;
                 }
             }
+        };
+        let work = self.rows * self.cols * other.cols;
+        if work < MATMUL_PARALLEL_MIN_WORK {
+            out.data.chunks_mut(other.cols).enumerate().for_each(row);
+        } else {
+            out.data.par_chunks_mut(other.cols).with_min_len(MATMUL_ROWS_PER_TASK).enumerate().for_each(row);
         }
         out
     }
@@ -152,88 +173,188 @@ pub struct SymmetricEigen {
     pub vectors: Matrix,
 }
 
-/// Diagonalizes a symmetric matrix with the cyclic Jacobi method. theory.typ eq:jacobi
+/// Rows handed to one rayon task in the row-parallel loops of `symmetric_eigen`.
+const EIGEN_ROWS_PER_TASK: usize = 16;
+
+/// Implicit QL iterations allowed per eigenvalue before giving up.
+const QL_MAX_ITER: usize = 50;
+
+/// QL rotations (in units of n) collected before they are applied to the eigenvectors
+/// in one pass over the rows.
+const QL_ROTATIONS_PER_ROW_PASS: usize = 16;
+
+/// Diagonalizes a symmetric matrix: Householder tridiagonalization followed by the
+/// implicitly shifted QL algorithm. theory.typ eq:householder eq:ql-shift UNCHECKED(Golub2013)
+///
+/// Every loop that touches an n × n matrix runs along rows (row-major storage) and is
+/// split over rows only, so the result does not depend on the number of threads.
 pub fn symmetric_eigen(a: &Matrix) -> Result<SymmetricEigen> {
+    use rayon::prelude::*;
+
     if a.rows != a.cols {
         return Err(QcError::InvalidInput("eigen: matrix is not square".into()));
     }
     let n = a.rows;
     // Work on the exactly symmetric part.
     let mut m = Matrix::from_fn(n, n, |i, j| 0.5 * (a[(i, j)] + a[(j, i)]));
-    let mut v = Matrix::identity(n);
-    let total: f64 = m.data.iter().map(|x| x * x).sum();
-    if !total.is_finite() {
+    if !m.data.iter().all(|x| x.is_finite()) {
         return Err(QcError::InvalidInput("eigen: non-finite matrix".into()));
     }
-    let mut converged = false;
-    let mut polish_done = false;
-    for _sweep in 0..100 {
-        let mut off = 0.0;
-        for i in 0..n {
-            for j in 0..n {
-                if i != j {
-                    off += m[(i, j)] * m[(i, j)];
+
+    // Step 1: T = Qᵀ A Q with Q = P_0 P_1 ⋯ P_{n-3} (theory.typ eq:householder).
+    // d is the diagonal of T, e[i] couples i and i + 1.
+    let mut d = vec![0.0; n];
+    let mut e = vec![0.0; n];
+    let mut reflectors: Vec<(usize, Vec<f64>, f64)> = Vec::new();
+    for k in 0..n.saturating_sub(2) {
+        d[k] = m[(k, k)];
+        // x = A[k+1.., k], read from row k (A is symmetric).
+        let x = &m.data[k * n + k + 1..(k + 1) * n];
+        let scale = x[1..].iter().fold(0.0f64, |s, v| s.max(v.abs()));
+        if scale == 0.0 {
+            // Column already in tridiagonal form: P_k = I.
+            e[k] = x[0];
+            continue;
+        }
+        let scale = scale.max(x[0].abs());
+        let tail: f64 = x[1..].iter().map(|v| (v / scale).powi(2)).sum();
+        if tail == 0.0 {
+            // Column already in tridiagonal form: P_k = I.
+            e[k] = x[0];
+            continue;
+        }
+        let mut v: Vec<f64> = x.iter().map(|xi| xi / scale).collect();
+        let norm = (v[0] * v[0] + tail).sqrt();
+        let alpha = if v[0] >= 0.0 { -norm } else { norm };
+        v[0] -= alpha;
+        let beta = 2.0 / (v[0] * v[0] + tail);
+        e[k] = alpha * scale;
+        // A22 <- P A22 P with p = β A22 v, w = p − (β pᵀv / 2) v: A22 −= v wᵀ + w vᵀ.
+        let off = k + 1;
+        let p: Vec<f64> = m.data[off * n..]
+            .par_chunks(n)
+            .with_min_len(EIGEN_ROWS_PER_TASK)
+            .map(|row| beta * row[off..].iter().zip(&v).map(|(a, b)| a * b).sum::<f64>())
+            .collect();
+        let kk = 0.5 * beta * p.iter().zip(&v).map(|(a, b)| a * b).sum::<f64>();
+        let w: Vec<f64> = p.iter().zip(&v).map(|(pi, vi)| pi - kk * vi).collect();
+        m.data[off * n..].par_chunks_mut(n).with_min_len(EIGEN_ROWS_PER_TASK).enumerate().for_each(|(i, row)| {
+            let (vi, wi) = (v[i], w[i]);
+            for ((r, vj), wj) in row[off..].iter_mut().zip(&v).zip(&w) {
+                *r -= vi * wj + wi * vj;
+            }
+        });
+        reflectors.push((k, v, beta));
+    }
+    if n >= 2 {
+        d[n - 2] = m[(n - 2, n - 2)];
+        e[n - 2] = m[(n - 2, n - 1)];
+    }
+    if n >= 1 {
+        d[n - 1] = m[(n - 1, n - 1)];
+    }
+
+    // Q = P_0 P_1 ⋯, accumulated row by row: Q[r, k+1..] −= β (Q[r, k+1..]·v) vᵀ for
+    // k = 0, 1, … in turn. Rows are independent, so one parallel pass applies all P_k.
+    let mut z = Matrix::identity(n);
+    z.data.par_chunks_mut(n.max(1)).with_min_len(EIGEN_ROWS_PER_TASK).for_each(|row| {
+        for (k, v, beta) in &reflectors {
+            let off = k + 1;
+            let t = beta * row[off..].iter().zip(v).map(|(a, b)| a * b).sum::<f64>();
+            if t != 0.0 {
+                for (r, vj) in row[off..].iter_mut().zip(v) {
+                    *r -= t * vj;
                 }
             }
         }
-        // The off-diagonal squared sum is <= 1e-22 of the total. That bounds the
-        // off-diagonal elements only at ~1e-11 ‖A‖, which leaves eigenvector errors of
-        // ~1e-10 in SCF use. Because Jacobi converges quadratically, one more sweep
-        // takes them to round-off level at little cost.
-        if off <= 1e-22 * total {
-            if polish_done || off == 0.0 {
-                converged = true;
+    });
+    drop(reflectors);
+
+    // Step 2: implicitly shifted QL on (d, e) (theory.typ eq:ql-shift). The plane
+    // rotations are recorded in order and applied to the columns of Z in batches, one
+    // row of Z at a time (each row sees the same sequence of rotations as if they were
+    // applied one by one), so that Z ends up holding Q times the eigenvectors of T.
+    let apply = |z: &mut Matrix, rotations: &[(usize, f64, f64)]| {
+        z.data.par_chunks_mut(n).with_min_len(EIGEN_ROWS_PER_TASK).for_each(|row| {
+            for &(i, c, s) in rotations {
+                let zi = row[i];
+                let zi1 = row[i + 1];
+                row[i + 1] = s * zi + c * zi1;
+                row[i] = c * zi - s * zi1;
+            }
+        });
+    };
+    let batch = QL_ROTATIONS_PER_ROW_PASS * n;
+    let mut rotations: Vec<(usize, f64, f64)> = Vec::with_capacity(batch + n);
+    for l in 0..n {
+        let mut iter = 0;
+        loop {
+            // Find the first negligible e[m] at or after l (e[n-1] = 0 always).
+            let mut mm = l;
+            while mm + 1 < n {
+                let dd = d[mm].abs() + d[mm + 1].abs();
+                if e[mm].abs() <= f64::EPSILON * dd {
+                    break;
+                }
+                mm += 1;
+            }
+            if mm == l {
                 break;
             }
-            polish_done = true;
-        }
-        for p in 0..n {
-            for q in p + 1..n {
-                let apq = m[(p, q)];
-                if apq == 0.0 {
-                    continue;
-                }
-                // theory.typ eq:jacobi (sgn(0) taken as +1)
-                let theta = (m[(q, q)] - m[(p, p)]) / (2.0 * apq);
-                let t = if theta.abs() > 1e150 {
-                    0.5 / theta
-                } else {
-                    let sgn = if theta >= 0.0 { 1.0 } else { -1.0 };
-                    sgn / (theta.abs() + (theta * theta + 1.0).sqrt())
-                };
-                let c = 1.0 / (t * t + 1.0).sqrt();
-                let s = t * c;
-                // A <- Pᵀ A P with P_pp = P_qq = c, P_pq = s, P_qp = -s.
-                for r in 0..n {
-                    let arp = m[(r, p)];
-                    let arq = m[(r, q)];
-                    m[(r, p)] = c * arp - s * arq;
-                    m[(r, q)] = s * arp + c * arq;
-                }
-                for r in 0..n {
-                    let apr = m[(p, r)];
-                    let aqr = m[(q, r)];
-                    m[(p, r)] = c * apr - s * aqr;
-                    m[(q, r)] = s * apr + c * aqr;
-                }
-                m[(p, q)] = 0.0;
-                m[(q, p)] = 0.0;
-                for r in 0..n {
-                    let vrp = v[(r, p)];
-                    let vrq = v[(r, q)];
-                    v[(r, p)] = c * vrp - s * vrq;
-                    v[(r, q)] = s * vrp + c * vrq;
-                }
+            iter += 1;
+            if iter > QL_MAX_ITER {
+                return Err(QcError::EigenNotConverged);
             }
+            // Shift: eigenvalue of the leading 2 × 2 block closer to d[l].
+            let delta = (d[l + 1] - d[l]) / (2.0 * e[l]);
+            let root = delta.hypot(1.0);
+            // sgn(0) = +1, also for delta = -0.0.
+            let sgn_root = if delta >= 0.0 { root } else { -root };
+            let mut g = d[mm] - d[l] + e[l] / (delta + sgn_root);
+            let (mut s, mut c, mut p) = (1.0, 1.0, 0.0);
+            let mut underflow = false;
+            for i in (l..mm).rev() {
+                let f = s * e[i];
+                let b = c * e[i];
+                let r = f.hypot(g);
+                e[i + 1] = r;
+                if r == 0.0 {
+                    // The rotation underflowed: T split at i + 1; restart this l.
+                    d[i + 1] -= p;
+                    e[mm] = 0.0;
+                    underflow = true;
+                    break;
+                }
+                s = f / r;
+                c = g / r;
+                g = d[i + 1] - p;
+                let t = (d[i] - g) * s + 2.0 * c * b;
+                p = s * t;
+                d[i + 1] = g + p;
+                g = c * t - b;
+                rotations.push((i, c, s));
+            }
+            if rotations.len() >= batch {
+                apply(&mut z, &rotations);
+                rotations.clear();
+            }
+            if underflow {
+                continue;
+            }
+            d[l] -= p;
+            e[l] = g;
+            e[mm] = 0.0;
         }
     }
-    if !converged {
-        return Err(QcError::EigenNotConverged);
+
+    if !rotations.is_empty() {
+        apply(&mut z, &rotations);
     }
+
     let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by(|&i, &j| m[(i, i)].total_cmp(&m[(j, j)]));
-    let values = order.iter().map(|&i| m[(i, i)]).collect();
-    let vectors = Matrix::from_fn(n, n, |r, c| v[(r, order[c])]);
+    order.sort_by(|&i, &j| d[i].total_cmp(&d[j]));
+    let values = order.iter().map(|&i| d[i]).collect();
+    let vectors = Matrix::from_fn(n, n, |r, c| z[(r, order[c])]);
     Ok(SymmetricEigen { values, vectors })
 }
 
@@ -306,7 +427,7 @@ mod tests {
     }
 
     #[test]
-    fn jacobi_reconstructs_matrix() {
+    fn eigen_reconstructs_matrix() {
         for n in [1, 2, 5, 20] {
             let a = test_matrix(n);
             let e = symmetric_eigen(&a).unwrap();
@@ -331,13 +452,99 @@ mod tests {
     }
 
     #[test]
-    fn jacobi_degenerate() {
+    fn eigen_degenerate() {
         // diag(1,1,2) rotated: eigenvalues 1,1,2
         let a = Matrix::from_vec(3, 3, vec![1.5, 0.5, 0.0, 0.5, 1.5, 0.0, 0.0, 0.0, 1.0]).unwrap();
         let e = symmetric_eigen(&a).unwrap();
         assert!((e.values[0] - 1.0).abs() < 1e-14);
         assert!((e.values[1] - 1.0).abs() < 1e-14);
         assert!((e.values[2] - 2.0).abs() < 1e-14);
+    }
+
+    #[test]
+    fn eigen_large_relative_accuracy() {
+        let n = 200;
+        let a = test_matrix(n);
+        let e = symmetric_eigen(&a).unwrap();
+        let v = &e.vectors;
+        let vtv = v.transpose().matmul(v);
+        assert!((&vtv - &Matrix::identity(n)).max_abs() < 1e-12);
+        // ‖A‖₂ = max |λ|.
+        let norm = e.values.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+        let av = a.matmul(v);
+        let mut resid = 0.0f64;
+        for i in 0..n {
+            for j in 0..n {
+                resid = resid.max((av[(i, j)] - v[(i, j)] * e.values[j]).abs());
+            }
+        }
+        assert!(resid < 1e-12 * norm, "max |AV - VΛ| = {resid:e}, ‖A‖ = {norm}");
+        for w in e.values.windows(2) {
+            assert!(w[0] <= w[1]);
+        }
+    }
+
+    #[test]
+    fn eigen_special_structures() {
+        // Already diagonal (unsorted), zero matrix, and a zero-diagonal 2 × 2 block.
+        let a = Matrix::from_vec(3, 3, vec![3.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 2.0]).unwrap();
+        let e = symmetric_eigen(&a).unwrap();
+        assert_eq!(e.values, vec![-1.0, 2.0, 3.0]);
+        assert_eq!(e.vectors[(1, 0)].abs(), 1.0);
+        let e = symmetric_eigen(&Matrix::zeros(4, 4)).unwrap();
+        assert_eq!(e.values, vec![0.0; 4]);
+        assert!((&e.vectors.transpose().matmul(&e.vectors) - &Matrix::identity(4)).max_abs() < 1e-15);
+        let a = Matrix::from_vec(2, 2, vec![0.0, 1.0, 1.0, 0.0]).unwrap();
+        let e = symmetric_eigen(&a).unwrap();
+        assert!((e.values[0] + 1.0).abs() < 1e-15 && (e.values[1] - 1.0).abs() < 1e-15);
+        assert!(symmetric_eigen(&Matrix::zeros(0, 0)).unwrap().values.is_empty());
+    }
+
+    /// Plain triple loop with the same summation order as `Matrix::matmul`.
+    fn matmul_reference(a: &Matrix, b: &Matrix) -> Matrix {
+        let mut out = Matrix::zeros(a.rows(), b.cols());
+        for i in 0..a.rows() {
+            for k in 0..a.cols() {
+                let x = a[(i, k)];
+                if x == 0.0 {
+                    continue;
+                }
+                for j in 0..b.cols() {
+                    out[(i, j)] += x * b[(k, j)];
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn matmul_bitwise_independent_of_threads() {
+        // Sizes below and above the parallel threshold, non-square, and with zeros.
+        let big = test_matrix(97);
+        let mut sparse = test_matrix(97);
+        for i in 0..97 {
+            sparse[(i, (i * 7) % 97)] = 0.0;
+        }
+        let rect = Matrix::from_fn(70, 130, |i, j| ((i * 131 + j * 17) % 23) as f64 / 7.0 - 1.5);
+        let rect_t = rect.transpose();
+        let cases = [
+            (test_matrix(5), test_matrix(5)),
+            (big.clone(), sparse.clone()),
+            (sparse, big),
+            (rect.clone(), rect_t.clone()),
+            (rect_t, rect),
+            (Matrix::zeros(3, 0), Matrix::zeros(0, 4)),
+            (Matrix::zeros(0, 3), Matrix::zeros(3, 0)),
+        ];
+        let one = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+        let four = rayon::ThreadPoolBuilder::new().num_threads(4).build().unwrap();
+        for (a, b) in &cases {
+            let r = matmul_reference(a, b);
+            let bits = |m: &Matrix| m.as_slice().iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+            assert_eq!(bits(&a.matmul(b)), bits(&r));
+            assert_eq!(bits(&one.install(|| a.matmul(b))), bits(&r));
+            assert_eq!(bits(&four.install(|| a.matmul(b))), bits(&r));
+        }
     }
 
     #[test]

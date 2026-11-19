@@ -1,5 +1,5 @@
 //! Values and first/second Cartesian derivatives of the AO basis functions at
-//! arbitrary points (theory.typ eq:contracted, eq:ao-deriv, eq:sph-d).
+//! arbitrary points (theory.typ eq:contracted, eq:ao-deriv, eq:sph-d). UNCHECKED(Helgaker2000) UNCHECKED(Schlegel1995)
 //!
 //! A Cartesian component is χ = c_lmn P(r_A) g(r_A²) with P = x^l y^m z^n and
 //! g = Σ_k d̃_k e^{-a_k r_A²}. With G0 = g, G_i = ∂_i g = x_i R1 and
@@ -72,11 +72,12 @@ pub fn eval_ao_shells(basis: &Basis, shells: &[usize], points: &[[f64; 3]], deri
     let mut data = vec![0.0; ncomp * n_ao * np];
     let mut col = 0;
     let mut cart = Vec::new();
+    let mut radial = ShellRadial::default();
     for sh in shells {
         let ncart = sh.n_cartesian();
         cart.clear();
         cart.resize(ncomp * ncart * np, 0.0);
-        eval_shell_cartesian(sh, points, deriv, &mut cart);
+        eval_shell_cartesian(sh, points, deriv, &mut radial, &mut cart);
         match sh.spherical_transform() {
             None => {
                 for c in 0..ncomp {
@@ -111,65 +112,173 @@ pub fn eval_ao_shells(basis: &Basis, shells: &[usize], points: &[[f64; 3]], deri
     AoValues { deriv, n_ao, n_points: np, data }
 }
 
+/// e^t rounds to exactly 0.0 in f64 for t below about −745.13 (half the smallest
+/// subnormal), so a primitive with −a r² below this bound adds exactly nothing.
+const EXP_IS_ZERO_BELOW: f64 = -746.0;
+
+/// Per-point data of one shell shared by all its Cartesian components: the
+/// displacement r_A = (x, y, z) and the radial sums G0, R1, R2 of the module documentation.
+#[derive(Debug, Default)]
+struct ShellRadial {
+    x: Vec<f64>,
+    y: Vec<f64>,
+    z: Vec<f64>,
+    g0: Vec<f64>,
+    r1: Vec<f64>,
+    r2: Vec<f64>,
+}
+
+impl ShellRadial {
+    /// theory.typ eq:contracted; R1 and R2 only for `deriv` ≥ 1.
+    fn fill(&mut self, sh: &Shell, points: &[[f64; 3]], deriv: usize) {
+        let np = points.len();
+        for v in [&mut self.x, &mut self.y, &mut self.z, &mut self.g0, &mut self.r1, &mut self.r2] {
+            v.clear();
+            v.resize(np, 0.0);
+        }
+        let c0 = sh.center;
+        for (g, p) in points.iter().enumerate() {
+            let x = [p[0] - c0[0], p[1] - c0[1], p[2] - c0[2]];
+            let r2 = x[0] * x[0] + x[1] * x[1] + x[2] * x[2];
+            let (mut g0, mut r1, mut r2s) = (0.0, 0.0, 0.0);
+            for (&a, &d) in sh.exponents.iter().zip(&sh.coefficients) {
+                let t = -a * r2;
+                if t < EXP_IS_ZERO_BELOW {
+                    // e = d · 0.0 would leave all three sums unchanged.
+                    continue;
+                }
+                let e = d * t.exp();
+                g0 += e;
+                if deriv >= 1 {
+                    r1 -= 2.0 * a * e;
+                    r2s += 4.0 * a * a * e;
+                }
+            }
+            self.x[g] = x[0];
+            self.y[g] = x[1];
+            self.z[g] = x[2];
+            self.g0[g] = g0;
+            self.r1[g] = r1;
+            self.r2[g] = r2s;
+        }
+    }
+}
+
+/// Monomial factors of one axis, (t^n, n t^(n-1), n(n-1) t^(n-2)), for any n.
+fn axis_factors(t: f64, n: usize) -> [f64; 3] {
+    let pw = |k: i64| if k < 0 { 0.0 } else { t.powi(k as i32) };
+    let n_ = n as i64;
+    [pw(n_), n as f64 * pw(n_ - 1), (n * n.saturating_sub(1)) as f64 * pw(n_ - 2)]
+}
+
+// The same factors for n = 0, 1, 2 written out; each entry equals the
+// corresponding `axis_factors` value exactly (powi(1) = t, powi(2) = t·t).
+fn axis_factors_0(_t: f64) -> [f64; 3] {
+    [1.0, 0.0, 0.0]
+}
+fn axis_factors_1(t: f64) -> [f64; 3] {
+    [t, 1.0, 0.0]
+}
+fn axis_factors_2(t: f64) -> [f64; 3] {
+    [t * t, 2.0 * t, 2.0]
+}
+
 /// Fills `out[(comp * ncart + k) * np + g]` with the normalized Cartesian components
-/// of `sh` and their derivatives. theory.typ eq:contracted, eq:cart-norm, eq:ao-deriv
-fn eval_shell_cartesian(sh: &Shell, points: &[[f64; 3]], deriv: usize, out: &mut [f64]) {
+/// of `sh` and their derivatives. theory.typ eq:contracted, eq:cart-norm, eq:ao-deriv UNCHECKED(Helgaker2000)
+///
+/// The radial sums are formed once per point; each component is then written
+/// point by point into contiguous rows, with the monomial factors specialized per
+/// (l, m, n) so that no `powi` remains in the inner loop for l ≤ 2.
+fn eval_shell_cartesian(sh: &Shell, points: &[[f64; 3]], deriv: usize, rad: &mut ShellRadial, out: &mut [f64]) {
     let np = points.len();
+    if np == 0 {
+        return;
+    }
+    rad.fill(sh, points, deriv);
     let comps = cartesian_components(sh.l);
     let ncart = comps.len();
-    let norms: Vec<f64> = comps.iter().map(|&c| cartesian_norm(c)).collect();
-    let c0 = sh.center;
-    for (g, p) in points.iter().enumerate() {
-        let x = [p[0] - c0[0], p[1] - c0[1], p[2] - c0[2]];
-        let r2 = x[0] * x[0] + x[1] * x[1] + x[2] * x[2];
-        let (mut g0, mut r1, mut r2s) = (0.0, 0.0, 0.0);
-        for (&a, &d) in sh.exponents.iter().zip(&sh.coefficients) {
-            let e = d * (-a * r2).exp();
-            g0 += e;
-            if deriv >= 1 {
-                r1 -= 2.0 * a * e;
-                r2s += 4.0 * a * a * e;
-            }
+    for (k, &lmn) in comps.iter().enumerate() {
+        let cn = cartesian_norm(lmn);
+        let mut rows: [&mut [f64]; 10] = Default::default();
+        for (row, chunk) in rows.iter_mut().zip(out.chunks_exact_mut(np).skip(k).step_by(ncart)) {
+            *row = chunk;
         }
-        // Monomial factors per axis: (t^n, n t^(n-1), n(n-1) t^(n-2)).
-        let fac = |t: f64, n: usize| -> [f64; 3] {
-            let pw = |k: i64| if k < 0 { 0.0 } else { t.powi(k as i32) };
-            let n_ = n as i64;
-            [pw(n_), n as f64 * pw(n_ - 1), (n * n.saturating_sub(1)) as f64 * pw(n_ - 2)]
-        };
-        for (k, (lmn, &cn)) in comps.iter().zip(&norms).enumerate() {
-            let f = [fac(x[0], lmn[0]), fac(x[1], lmn[1]), fac(x[2], lmn[2])];
-            let pv = f[0][0] * f[1][0] * f[2][0];
-            out[k * np + g] = cn * pv * g0;
-            if deriv == 0 {
-                continue;
+        match deriv {
+            0 => component_dispatch::<0>(lmn, cn, rad, &mut rows),
+            1 => component_dispatch::<1>(lmn, cn, rad, &mut rows),
+            _ => component_dispatch::<2>(lmn, cn, rad, &mut rows),
+        }
+    }
+}
+
+fn component_dispatch<const D: usize>(lmn: [usize; 3], cn: f64, rad: &ShellRadial, rows: &mut [&mut [f64]; 10]) {
+    use {axis_factors_0 as a0, axis_factors_1 as a1, axis_factors_2 as a2};
+    match lmn {
+        [0, 0, 0] => component::<D, _, _, _>(a0, a0, a0, cn, rad, rows),
+        [1, 0, 0] => component::<D, _, _, _>(a1, a0, a0, cn, rad, rows),
+        [0, 1, 0] => component::<D, _, _, _>(a0, a1, a0, cn, rad, rows),
+        [0, 0, 1] => component::<D, _, _, _>(a0, a0, a1, cn, rad, rows),
+        [2, 0, 0] => component::<D, _, _, _>(a2, a0, a0, cn, rad, rows),
+        [1, 1, 0] => component::<D, _, _, _>(a1, a1, a0, cn, rad, rows),
+        [1, 0, 1] => component::<D, _, _, _>(a1, a0, a1, cn, rad, rows),
+        [0, 2, 0] => component::<D, _, _, _>(a0, a2, a0, cn, rad, rows),
+        [0, 1, 1] => component::<D, _, _, _>(a0, a1, a1, cn, rad, rows),
+        [0, 0, 2] => component::<D, _, _, _>(a0, a0, a2, cn, rad, rows),
+        [l, m, n] => component::<D, _, _, _>(
+            |t| axis_factors(t, l),
+            |t| axis_factors(t, m),
+            |t| axis_factors(t, n),
+            cn,
+            rad,
+            rows,
+        ),
+    }
+}
+
+/// One Cartesian component χ = c P G0 and its derivatives up to order `D` (module
+/// documentation) at every point, written to `rows[comp][g]`.
+#[inline(always)]
+fn component<const D: usize, FX, FY, FZ>(fx: FX, fy: FY, fz: FZ, cn: f64, rad: &ShellRadial, rows: &mut [&mut [f64]; 10])
+where
+    FX: Fn(f64) -> [f64; 3],
+    FY: Fn(f64) -> [f64; 3],
+    FZ: Fn(f64) -> [f64; 3],
+{
+    let xyz = rad.x.iter().zip(&rad.y).zip(&rad.z);
+    let radial = rad.g0.iter().zip(&rad.r1).zip(&rad.r2);
+    for (g, (((&x0, &x1), &x2), ((&g0, &r1), &r2s))) in xyz.zip(radial).enumerate() {
+        let x = [x0, x1, x2];
+        let f = [fx(x[0]), fy(x[1]), fz(x[2])];
+        let pv = f[0][0] * f[1][0] * f[2][0];
+        rows[0][g] = cn * pv * g0;
+        if D == 0 {
+            continue;
+        }
+        // P_i: derivative order 1 along axis i only.
+        let mut pd = [0.0; 3];
+        for i in 0..3 {
+            let mut v = 1.0;
+            for (ax, fa) in f.iter().enumerate() {
+                v *= fa[usize::from(ax == i)];
             }
-            // P_i: derivative order 1 along axis i only.
-            let mut pd = [0.0; 3];
-            for i in 0..3 {
-                let mut v = 1.0;
+            pd[i] = v;
+        }
+        let gi = [x[0] * r1, x[1] * r1, x[2] * r1];
+        for i in 0..3 {
+            rows[D_X + i][g] = cn * (pd[i] * g0 + pv * gi[i]);
+        }
+        if D == 1 {
+            continue;
+        }
+        for i in 0..3 {
+            for j in i..3 {
+                let mut pij = 1.0;
                 for (ax, fa) in f.iter().enumerate() {
-                    v *= fa[usize::from(ax == i)];
+                    pij *= fa[usize::from(ax == i) + usize::from(ax == j)];
                 }
-                pd[i] = v;
-            }
-            let gi = [x[0] * r1, x[1] * r1, x[2] * r1];
-            for i in 0..3 {
-                out[((D_X + i) * ncart + k) * np + g] = cn * (pd[i] * g0 + pv * gi[i]);
-            }
-            if deriv == 1 {
-                continue;
-            }
-            for i in 0..3 {
-                for j in i..3 {
-                    let mut pij = 1.0;
-                    for (ax, fa) in f.iter().enumerate() {
-                        pij *= fa[usize::from(ax == i) + usize::from(ax == j)];
-                    }
-                    let gij = if i == j { r1 } else { 0.0 } + x[i] * x[j] * r2s;
-                    let v = pij * g0 + pd[i] * gi[j] + pd[j] * gi[i] + pv * gij;
-                    out[(hessian_component(i, j) * ncart + k) * np + g] = cn * v;
-                }
+                let gij = if i == j { r1 } else { 0.0 } + x[i] * x[j] * r2s;
+                let v = pij * g0 + pd[i] * gi[j] + pd[j] * gi[i] + pv * gij;
+                rows[hessian_component(i, j)][g] = cn * v;
             }
         }
     }
@@ -230,6 +339,141 @@ mod tests {
 
     fn test_points() -> Vec<[f64; 3]> {
         vec![[0.3, -0.2, 0.5], [1.1, 0.0, 0.1], [-0.7, 0.9, -0.4], [2.0, 1.5, -1.0], [0.05, 0.12, 0.21]]
+    }
+
+    /// The previous per-point implementation of `eval_shell_cartesian`, kept as the
+    /// reference the specialized kernel must reproduce.
+    fn reference_eval_shell_cartesian(sh: &Shell, points: &[[f64; 3]], deriv: usize, out: &mut [f64]) {
+        let np = points.len();
+        let comps = cartesian_components(sh.l);
+        let ncart = comps.len();
+        let norms: Vec<f64> = comps.iter().map(|&c| cartesian_norm(c)).collect();
+        let c0 = sh.center;
+        for (g, p) in points.iter().enumerate() {
+            let x = [p[0] - c0[0], p[1] - c0[1], p[2] - c0[2]];
+            let r2 = x[0] * x[0] + x[1] * x[1] + x[2] * x[2];
+            let (mut g0, mut r1, mut r2s) = (0.0, 0.0, 0.0);
+            for (&a, &d) in sh.exponents.iter().zip(&sh.coefficients) {
+                let e = d * (-a * r2).exp();
+                g0 += e;
+                if deriv >= 1 {
+                    r1 -= 2.0 * a * e;
+                    r2s += 4.0 * a * a * e;
+                }
+            }
+            // Monomial factors per axis: (t^n, n t^(n-1), n(n-1) t^(n-2)).
+            let fac = |t: f64, n: usize| -> [f64; 3] {
+                let pw = |k: i64| if k < 0 { 0.0 } else { t.powi(k as i32) };
+                let n_ = n as i64;
+                [pw(n_), n as f64 * pw(n_ - 1), (n * n.saturating_sub(1)) as f64 * pw(n_ - 2)]
+            };
+            for (k, (lmn, &cn)) in comps.iter().zip(&norms).enumerate() {
+                let f = [fac(x[0], lmn[0]), fac(x[1], lmn[1]), fac(x[2], lmn[2])];
+                let pv = f[0][0] * f[1][0] * f[2][0];
+                out[k * np + g] = cn * pv * g0;
+                if deriv == 0 {
+                    continue;
+                }
+                let mut pd = [0.0; 3];
+                for i in 0..3 {
+                    let mut v = 1.0;
+                    for (ax, fa) in f.iter().enumerate() {
+                        v *= fa[usize::from(ax == i)];
+                    }
+                    pd[i] = v;
+                }
+                let gi = [x[0] * r1, x[1] * r1, x[2] * r1];
+                for i in 0..3 {
+                    out[((D_X + i) * ncart + k) * np + g] = cn * (pd[i] * g0 + pv * gi[i]);
+                }
+                if deriv == 1 {
+                    continue;
+                }
+                for i in 0..3 {
+                    for j in i..3 {
+                        let mut pij = 1.0;
+                        for (ax, fa) in f.iter().enumerate() {
+                            pij *= fa[usize::from(ax == i) + usize::from(ax == j)];
+                        }
+                        let gij = if i == j { r1 } else { 0.0 } + x[i] * x[j] * r2s;
+                        let v = pij * g0 + pd[i] * gi[j] + pd[j] * gi[i] + pv * gij;
+                        out[(hessian_component(i, j) * ncart + k) * np + g] = cn * v;
+                    }
+                }
+            }
+        }
+    }
+
+    /// `eval_ao` built on the reference kernel (same spherical transform, eq:sph-d).
+    fn reference_eval_ao(basis: &Basis, points: &[[f64; 3]], deriv: usize) -> AoValues {
+        let n_ao = basis.nao();
+        let np = points.len();
+        let ncomp = N_DERIV_COMPONENTS[deriv];
+        let mut data = vec![0.0; ncomp * n_ao * np];
+        let mut col = 0;
+        for sh in basis.shells() {
+            let ncart = sh.n_cartesian();
+            let mut cart = vec![0.0; ncomp * ncart * np];
+            reference_eval_shell_cartesian(sh, points, deriv, &mut cart);
+            for c in 0..ncomp {
+                match sh.spherical_transform() {
+                    None => {
+                        for k in 0..ncart {
+                            let d = (c * n_ao + col + k) * np;
+                            data[d..d + np].copy_from_slice(&cart[(c * ncart + k) * np..(c * ncart + k + 1) * np]);
+                        }
+                    }
+                    Some(t) => {
+                        for (m, row) in t.iter().enumerate() {
+                            let d = (c * n_ao + col + m) * np;
+                            for (k, &w) in row.iter().enumerate() {
+                                if w == 0.0 {
+                                    continue;
+                                }
+                                let src = &cart[(c * ncart + k) * np..(c * ncart + k + 1) * np];
+                                for (o, s) in data[d..d + np].iter_mut().zip(src) {
+                                    *o += w * s;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            col += sh.n_functions();
+        }
+        AoValues { deriv, n_ao, n_points: np, data }
+    }
+
+    #[test]
+    fn exp_cutoff_gives_exact_zero() {
+        assert_eq!(EXP_IS_ZERO_BELOW.exp(), 0.0);
+        assert_eq!((EXP_IS_ZERO_BELOW - 1e-9).exp(), 0.0);
+        // The bound is not overly eager: e^-745 is still a (subnormal) nonzero number.
+        assert!((-745.0f64).exp() > 0.0);
+    }
+
+    #[test]
+    fn specialized_kernel_matches_reference() {
+        // Points at a nucleus, near the atoms, and far enough out that the tight
+        // primitives are skipped (a r² > 746) while diffuse ones still contribute.
+        let mut pts = test_points();
+        pts.extend([[0.0, 0.1, 0.2], [1.5, -0.3, 0.4], [0.9, 3.0, -2.5], [-4.0, 2.0, 1.0], [7.0, -6.0, 5.0], [15.0, 0.0, 0.0]]);
+        let mut compared = 0usize;
+        for cart in [false, true] {
+            let basis = test_basis(cart);
+            for deriv in 0..=2 {
+                let new = eval_ao(&basis, &pts, deriv);
+                let reference = reference_eval_ao(&basis, &pts, deriv);
+                assert_eq!((new.n_ao, new.n_points, new.data.len()), (reference.n_ao, reference.n_points, reference.data.len()));
+                for (i, (&a, &b)) in new.data.iter().zip(&reference.data).enumerate() {
+                    // Same floating-point expressions in the same order: bitwise equal
+                    // (up to the sign of zero), which is stricter than 1e-15 relative.
+                    assert!(a == b, "cart={cart} deriv={deriv} entry {i}: {a:e} vs reference {b:e}");
+                    compared += 1;
+                }
+            }
+        }
+        assert!(compared > 0);
     }
 
     #[test]

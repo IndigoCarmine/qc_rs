@@ -1,7 +1,7 @@
 ﻿//! Atom-centred molecular integration grids (theory.typ section 8.4):
-//! Gauss–Chebyshev radial grid with Becke's mapping (eq:radial), Gauss–Legendre ×
-//! uniform-φ product angular grid (eq:angular, eq:gauss-legendre) and Becke's
-//! fuzzy-cell partitioning with atomic size adjustment (eq:becke-mu … eq:becke-w).
+//! Gauss–Chebyshev radial grid with Becke's mapping (eq:radial), Gauss–Legendre × UNCHECKED(Becke1988grid)
+//! uniform-φ product angular grid (eq:angular, eq:gauss-legendre) and Becke's UNCHECKED(Press2007)
+//! fuzzy-cell partitioning with atomic size adjustment (eq:becke-mu … eq:becke-w). UNCHECKED(Becke1988grid)
 
 use crate::error::{QcError, Result};
 use crate::molecule::{BOHR_IN_ANGSTROM, Molecule};
@@ -9,6 +9,7 @@ use rayon::prelude::*;
 use std::f64::consts::PI;
 use std::ops::Range;
 
+/// Values: UNCHECKED(Slater1964).
 /// Bragg–Slater radii H–Ar in Ångström (theory.typ section 8.4 table; noble gases
 /// have conventional values).
 const BRAGG_SLATER_ANGSTROM: [f64; 18] = [
@@ -20,7 +21,7 @@ const BRAGG_SLATER_ANGSTROM: [f64; 18] = [
 /// point, far below any measurable effect.
 pub const WEIGHT_CUTOFF: f64 = 1e-20;
 
-/// Bragg–Slater radius R_BS of element `z` in Bohr (theory.typ eq:bohr conversion).
+/// Bragg–Slater radius R_BS of element `z` in Bohr (theory.typ eq:bohr conversion). UNCHECKED(CODATA2018)
 pub fn bragg_slater_radius(z: u32) -> Option<f64> {
     if (1..=18).contains(&z) { Some(BRAGG_SLATER_ANGSTROM[z as usize - 1] / BOHR_IN_ANGSTROM) } else { None }
 }
@@ -121,7 +122,7 @@ pub fn angular_grid(n_theta: usize) -> (Vec<[f64; 3]>, Vec<f64>) {
     (pts, wts)
 }
 
-/// s(ν) = ½[1 - p(p(p(ν)))], p(t) = 3t/2 - t³/2. theory.typ eq:becke-s
+/// s(ν) = ½[1 - p(p(p(ν)))], p(t) = 3t/2 - t³/2. theory.typ eq:becke-s UNCHECKED(Becke1988grid)
 #[inline]
 fn becke_s(nu: f64) -> f64 {
     let p = |t: f64| 1.5 * t - 0.5 * t * t * t;
@@ -133,7 +134,7 @@ struct BeckePartition {
     centers: Vec<[f64; 3]>,
     /// 1/R_AB (row-major, n×n).
     inv_r: Vec<f64>,
-    /// a_AB (row-major, n×n). theory.typ eq:becke-a
+    /// a_AB (row-major, n×n). theory.typ eq:becke-a UNCHECKED(Becke1988grid)
     a: Vec<f64>,
 }
 

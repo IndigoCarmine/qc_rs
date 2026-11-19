@@ -105,7 +105,7 @@ fn gradients_match_pyscf() {
             failures.push(format!("{case}: RHF gradient not invariant (force {force:.1e}, torque {torque:.1e})"));
         }
     }
-    assert_eq!(n_cases, 23, "expected 23 reference gradients");
+    assert_eq!(n_cases, 29, "expected 29 reference gradients (23 + 6 CAM-B3LYP)");
     println!("max |g - g_pyscf|: RHF {worst_rhf:.2e}, DFT {worst_dft:.2e}");
     assert!(failures.is_empty(), "failures:\n{}", failures.join("\n"));
 }
@@ -126,6 +126,8 @@ fn gradients_match_finite_differences() {
         ("hf", "6-31g*", GridSettings::default(), 1e-6),
         ("b3lyp", "6-31g", GridSettings::default(), 2e-4),
         ("b3lyp", "6-31g", GridSettings::fine(), 2e-5),
+        ("cam-b3lyp", "6-31g", GridSettings::default(), 2e-4),
+        ("cam-b3lyp", "6-31g", GridSettings::fine(), 2e-5),
     ] {
         let calc = Calculation::new(&mol, method, basis).unwrap().with_grid(grid).with_scf_options(tight.clone());
         let g = calc.gradient().unwrap().gradient;
@@ -149,7 +151,11 @@ fn gradients_match_finite_differences() {
             worst_rich = worst_rich.max((rich - g[i / 3][i % 3]).abs());
         }
         let (force, torque) = invariance(&mol, &g);
-        let label = if method == "hf" { format!("RHF/{basis}") } else { format!("B3LYP/{basis} grid {grid:?}") };
+        let label = if method == "hf" {
+            format!("RHF/{basis}")
+        } else {
+            format!("{}/{basis} grid {grid:?}", method.to_uppercase())
+        };
         println!(
             "{label:62} max|analytic - FD(h=1e-3)| = {worst:.2e}, Richardson {worst_rich:.2e}; |sum F| = {force:.1e}, \
              |torque| = {torque:.1e}"
@@ -158,11 +164,44 @@ fn gradients_match_finite_differences() {
     }
 }
 
-/// Timings of single gradients (printed): H2CO RHF/6-31G* and H2CO B3LYP/6-31G on the fine grid.
+/// Translational invariance of the CAM-B3LYP gradient (h2o_dist/6-31G*): every term
+/// except E_xc^(X) sums to zero over the atoms on its own, the attenuated two-electron
+/// term (eq:cam-grad) included; the E_xc^(X) term and hence the total only to grid
+/// accuracy (theory.typ section 10.5).
+#[test]
+fn cam_b3lyp_gradient_translational_invariance() {
+    let reference = load_reference();
+    let mol = molecule(find(&reference, "h2o_dist", "6-31g*", "rhf"), "coords_bohr");
+    let res = Calculation::new(&mol, "cam-b3lyp", "6-31g*").unwrap().with_grid(GridSettings::fine()).gradient().unwrap();
+    let c = &res.components;
+    let net = |g: &[[f64; 3]]| {
+        let s = g.iter().fold([0.0; 3], |a, x| [a[0] + x[0], a[1] + x[1], a[2] + x[2]]);
+        (s[0] * s[0] + s[1] * s[1] + s[2] * s[2]).sqrt()
+    };
+    let exact = [
+        ("one-electron", net(&c.one_electron)),
+        ("two-electron", net(&c.two_electron)),
+        ("overlap", net(&c.overlap)),
+        ("nuclear repulsion", net(&c.nuclear_repulsion)),
+    ];
+    let (force, torque) = invariance(&mol, &res.gradient);
+    println!("CAM-B3LYP/6-31G* h2o_dist |sum F| per term: {exact:?}; xc {:.1e}; total {force:.1e}, torque {torque:.1e}", net(&c.xc));
+    for (what, v) in exact {
+        assert!(v < 1e-10, "{what}: net force {v:.1e}");
+    }
+    assert!(force < 1e-5, "total net force {force:.1e}");
+}
+
+/// Timings of single gradients (printed): H2CO RHF/6-31G*, and H2CO B3LYP/6-31G and
+/// CAM-B3LYP/6-31G on the fine grid.
 #[test]
 fn gradient_timings() {
     let reference = load_reference();
-    for (basis, method, grid) in [("6-31g*", "rhf", GridSettings::default()), ("6-31g", "b3lypg", GridSettings::fine())] {
+    for (basis, method, grid) in [
+        ("6-31g*", "rhf", GridSettings::default()),
+        ("6-31g", "b3lypg", GridSettings::fine()),
+        ("6-31g", "camb3lyp", GridSettings::fine()),
+    ] {
         let entry = find(&reference, "h2co", basis, method);
         let mol = molecule(entry, "coords_bohr");
         let functional = Functional::from_name(if method == "rhf" { "hf" } else { method }).unwrap();
@@ -181,7 +220,7 @@ fn gradient_timings() {
         let g = rks_gradient(&mol, &b, &scf, &xc).unwrap();
         let t_grad = t0.elapsed().as_secs_f64();
         let t0 = Instant::now();
-        let _ = qc_rs::gradient::two_electron_gradient(&mol, &b, &scf.density, functional.exact_exchange_fraction());
+        let _ = qc_rs::gradient::two_electron_gradient(&mol, &b, &scf.density, functional.exchange_kernel());
         let t_2e = t0.elapsed().as_secs_f64();
         let t0 = Instant::now();
         let _ = qc_rs::gradient::xc_gradient(&mol, &b, &xc, &scf.density);

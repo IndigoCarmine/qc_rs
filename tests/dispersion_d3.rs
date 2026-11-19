@@ -1,0 +1,397 @@
+//! DFT-D3 two-body energies and gradients against dftd3 1.7.0
+//! (tests/reference/d3_reference.json, made by tests/reference/gen_d3_reference.py
+//! with no distance cutoff and no three-body term), for B3LYP and CAM-B3LYP with BJ
+//! and zero damping, on every molecule of the reference file (all elements H–Ar and
+//! tests/molecules/*.xyz). The analytic gradient (theory.typ eq:d3-grad) is also
+//! checked against central differences of the energy, and the central-difference
+//! Hessian of that gradient (eq:hess-fd) against the Hessian of dftd3.
+
+use qc_rs::dispersion::{D3Damping, D3Parameters, D3Variant, dispersion_energy, dispersion_energy_and_gradient};
+use qc_rs::{Calculation, GridSettings, Molecule, OptimizerSettings, QcError, Unit, central_difference_hessian};
+use serde_json::Value;
+use std::path::PathBuf;
+
+fn reference() -> Value {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/reference/d3_reference.json");
+    serde_json::from_str(&std::fs::read_to_string(path).expect("d3_reference.json")).expect("valid JSON")
+}
+
+/// Relative tolerances |E - E_ref| / |E_ref|, set by the precision of the data, not
+/// by the implementation. The embedded D3 data (data/dispersion/README.md) are
+/// float32 values written as decimals, so every reference C6, r4r2, reference CN and
+/// r0ab can differ from the values inside dftd3 by up to ~6e-8 relative.
+///
+/// * BJ: C6 carries up to 6e-8 and C8 = 3 C6 r4r2_A r4r2_B (eq:d3-c8) up to 3 × 6e-8;
+///   the damping radius a1 sqrt(3 r4r2_A r4r2_B) + a2 enters with weight below one.
+///   Bound ≈ 2e-7; observed: at most 3.8e-8 (B3LYP) and 2.7e-8 (CAM-B3LYP). An
+///   absolute 1e-10 Hartree is not reachable: 6e-8 of the 0.05 Hartree of the
+///   largest molecule (BarPh) is already 3e-9 (observed 5.2e-10).
+/// * Zero: in addition, the tabulated R0^AB enters eq:d3-zero through
+///   (r / (s_r R0))^(-α_n), and ∂ln f_n / ∂ln R0 = α_n (1 - f_n) ≤ α_8 = 16, so the
+///   6e-8 of r0ab becomes up to ~1e-6. Observed: at most 6.9e-7 (both functionals),
+///   with both signs, as rounding noise would give.
+const REL_TOL_BJ: f64 = 2e-7;
+const REL_TOL_ZERO: f64 = 1.5e-6;
+
+/// (reference label, functional, variant)
+const CASES: [(&str, &str, D3Variant); 4] = [
+    ("b3lyp-d3bj", "b3lyp", D3Variant::Bj),
+    ("cam-b3lyp-d3bj", "cam-b3lyp", D3Variant::Bj),
+    ("b3lyp-d3zero", "b3lyp", D3Variant::Zero),
+    ("cam-b3lyp-d3zero", "cam-b3lyp", D3Variant::Zero),
+];
+
+fn molecule(entry: &Value) -> Molecule {
+    let symbols: Vec<&str> = entry["atoms"].as_array().unwrap().iter().map(|s| s.as_str().unwrap()).collect();
+    Molecule::from_symbols(&symbols, &vectors(&entry["coords_bohr"]), Unit::Bohr, 0).unwrap()
+}
+
+/// A JSON array of 3-vectors (coordinates or gradient).
+fn vectors(v: &Value) -> Vec<[f64; 3]> {
+    v.as_array()
+        .unwrap()
+        .iter()
+        .map(|c| std::array::from_fn(|k| c[k].as_f64().unwrap()))
+        .collect()
+}
+
+/// The reference was computed with exactly the parameters of `for_functional`.
+fn check_parameters(label: &str, params: &D3Parameters, p: &Value) {
+    let get = |k: &str| p[k].as_f64().unwrap_or_else(|| panic!("{label}: no '{k}' in the reference"));
+    assert_eq!(get("s9"), 0.0, "{label}: the reference must have no three-body term");
+    match params.damping {
+        D3Damping::Bj { s6, a1, s8, a2 } => {
+            assert_eq!(p["damping"], "bj");
+            assert_eq!((s6, a1, s8, a2), (get("s6"), get("a1"), get("s8"), get("a2")), "{label}");
+        }
+        D3Damping::Zero { s6, sr6, s8, sr8, alpha6 } => {
+            assert_eq!(p["damping"], "zero");
+            assert_eq!((s6, sr6, s8, sr8, alpha6), (get("s6"), get("rs6"), get("s8"), get("rs8"), get("alp")), "{label}");
+        }
+        _ => panic!("{label}: unexpected damping"),
+    }
+}
+
+fn rel_tol(variant: D3Variant) -> f64 {
+    match variant {
+        D3Variant::Bj => REL_TOL_BJ,
+        D3Variant::Zero => REL_TOL_ZERO,
+        _ => panic!("no tolerance for {variant:?}"),
+    }
+}
+
+#[test]
+fn energies_match_dftd3() {
+    let r = reference();
+    let molecules = r["molecules"].as_object().unwrap();
+    assert!(molecules.len() >= 20, "reference has only {} molecules", molecules.len());
+    let mut failures = Vec::new();
+    for (label, func, variant) in CASES {
+        let params = D3Parameters::for_functional(func, variant).unwrap();
+        check_parameters(label, &params, &r["parameters"][label]);
+        let tol = rel_tol(variant);
+        for (name, entry) in molecules {
+            let e_ref = entry["results"][label]["energy"].as_f64().unwrap();
+            let e = dispersion_energy(&molecule(entry), &params).unwrap();
+            let rel = (e - e_ref).abs() / e_ref.abs();
+            println!("{label:16} {name:14} E = {e:.12e}  ref {e_ref:.12e}  rel {rel:.1e}");
+            // A NaN energy must fail too.
+            if rel.is_nan() || rel > tol {
+                failures.push(format!("{label} {name}: {e:.15e} vs {e_ref:.15e} (rel {rel:.2e} > {tol:e})"));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Size of the force of one atom pair (direct and CN terms of eq:d3-grad) in the
+/// reference molecules, used to turn the relative data error into an absolute
+/// gradient tolerance. The largest gradient component in d3_reference.json is
+/// 7.1e-4 Hartree/Bohr (BarPh, zero damping).
+const PAIR_FORCE_SCALE: f64 = 1e-3;
+
+/// Gradient against dftd3: |g - g_ref| ≤ rel_tol × PAIR_FORCE_SCALE per component,
+/// with the relative tolerance of the energy. Same argument as for the energy: each
+/// pair term of eq:d3-grad is proportional to C6 (data error ~6e-8 relative) and, for
+/// zero damping, depends on R0^AB through (r / (s_r R0))^(-α_n) with a sensitivity
+/// of order α_n. So the error of a component is the relative data error times the
+/// pair forces that add up to it, not times the component itself: a component can
+/// be a near-cancelling sum (SiH4 with zero damping: error 1.7e-6 of its largest
+/// component, although every pair term is within the energy tolerance), or zero by
+/// symmetry. Tolerances: BJ 2e-10, zero 1.5e-9 Hartree/Bohr. Observed: at most
+/// 2.2e-11 (BJ, BarPh) and 6.4e-10 (zero, BarPh).
+#[test]
+fn gradients_match_dftd3() {
+    let r = reference();
+    let molecules = r["molecules"].as_object().unwrap();
+    let mut failures = Vec::new();
+    for (label, func, variant) in CASES {
+        let params = D3Parameters::for_functional(func, variant).unwrap();
+        let tol = rel_tol(variant) * PAIR_FORCE_SCALE;
+        for (name, entry) in molecules {
+            let g_ref = vectors(&entry["results"][label]["gradient"]);
+            let (_, g) = dispersion_energy_and_gradient(&molecule(entry), &params).unwrap();
+            assert_eq!(g.len(), g_ref.len(), "{label} {name}: number of atoms");
+            // A NaN component must fail too.
+            let worst = g.iter().flatten().zip(g_ref.iter().flatten()).fold(0.0_f64, |m, (a, b)| {
+                let d = (a - b).abs();
+                if d.is_nan() || m.is_nan() { f64::NAN } else { m.max(d) }
+            });
+            println!("{label:16} {name:14} max |g - g_ref| = {worst:.2e}");
+            if worst.is_nan() || worst > tol {
+                failures.push(format!("{label} {name}: max |g - g_ref| = {worst:.3e} > {tol:e} Hartree/Bohr"));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Central differences of the energy, h = 1e-4 Bohr: truncation error h²/6 E''' and
+/// rounding ~1e-16 / h = 1e-12 Hartree/Bohr. Observed: at most 6e-12.
+#[test]
+fn gradients_match_central_differences() {
+    let r = reference();
+    let h = 1e-4;
+    for name in ["water_dimer", "PhNHCOCH3"] {
+        let mol = molecule(&r["molecules"][name]);
+        for (label, func, variant) in CASES {
+            let params = D3Parameters::for_functional(func, variant).unwrap();
+            let (e, g) = dispersion_energy_and_gradient(&mol, &params).unwrap();
+            // The energy is bit for bit the one of dispersion_energy.
+            assert_eq!(e, dispersion_energy(&mol, &params).unwrap(), "{label} {name}");
+            let x = mol.coordinates();
+            let mut worst = 0.0_f64;
+            for i in 0..x.len() {
+                let shifted = |s: f64| {
+                    let mut y = x.clone();
+                    y[i] += s;
+                    dispersion_energy(&mol.with_coordinates(&y).unwrap(), &params).unwrap()
+                };
+                let num = (shifted(h) - shifted(-h)) / (2.0 * h);
+                let d = (num - g[i / 3][i % 3]).abs();
+                assert!(d.is_finite(), "{label} {name}: coordinate {i}");
+                worst = worst.max(d);
+            }
+            println!("{label:16} {name:14} max |analytic - numeric| = {worst:.2e}");
+            assert!(worst < 1e-8, "{label} {name}: max |analytic - numeric| = {worst:e}");
+        }
+    }
+}
+
+/// D3 Hessian by central differences of the analytic gradient (theory.typ eq:hess-fd,
+/// eq:hess-sym, as used by `Calculation::hessian`) against the Hessian of dftd3
+/// (`DispersionModel.get_hessian`), on every reference molecule that has one.
+///
+/// Step h = 1e-4 Bohr (D3 is an analytic function with no SCF noise, so the step can
+/// be far below DEFAULT_HESSIAN_STEP). Error budget per element:
+/// * truncation h²/6 · ∂³g_i/∂x_j³ ≈ 1.7e-9 × g''' — of order 1e-11 here, as the
+///   asymmetry δ_asym of the unsymmetrised Hessian (also O(h²)) shows (≤ 9e-12);
+/// * rounding ~ 1e-16 · |g| / h ≈ 1e-15 (|g| < 1e-3);
+/// * data precision, the dominant term: the float32 C6, r4r2, CN and r0ab enter each
+///   pair term of the Hessian with the relative error of the energy (REL_TOL_BJ,
+///   REL_TOL_ZERO; for zero damping amplified by α_n through R0^AB), so the absolute
+///   error is that relative error times the pair Hessian elements that add up to an
+///   element. The largest element of the reference Hessians is 4.4e-4 Hartree/Bohr²
+///   (MgH2, zero damping), so PAIR_HESSIAN_SCALE = 1e-3 as for the gradient.
+///
+/// Tolerances: BJ 2e-10, zero 1.5e-9 Hartree/Bohr². Observed: at most 4.3e-11 (BJ, BH3) and 3.6e-10
+/// (zero, water dimer).
+#[test]
+fn hessians_match_dftd3() {
+    const PAIR_HESSIAN_SCALE: f64 = 1e-3;
+    let r = reference();
+    let h = 1e-4;
+    let mut n = 0;
+    let mut failures = Vec::new();
+    for (name, entry) in r["molecules"].as_object().unwrap() {
+        let mol = molecule(entry);
+        let n3 = 3 * mol.atoms().len();
+        for (label, func, variant) in CASES {
+            let Some(h_ref) = entry["results"][label].get("hessian") else { continue };
+            let h_ref: Vec<Vec<f64>> = h_ref
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row.as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect())
+                .collect();
+            assert_eq!(h_ref.len(), n3, "{label} {name}: Hessian rows");
+            let params = D3Parameters::for_functional(func, variant).unwrap();
+            let tol = rel_tol(variant) * PAIR_HESSIAN_SCALE;
+            let fd = central_difference_hessian(&mol.coordinates(), h, |x| {
+                let (_, g) = dispersion_energy_and_gradient(&mol.with_coordinates(x)?, &params)?;
+                Ok(g.iter().flatten().copied().collect())
+            })
+            .unwrap();
+            let mut worst = 0.0_f64;
+            let mut scale = 0.0_f64;
+            for (i, row) in h_ref.iter().enumerate() {
+                assert_eq!(row.len(), n3, "{label} {name}: Hessian columns");
+                for (j, &v) in row.iter().enumerate() {
+                    let d = (fd.hessian[(i, j)] - v).abs();
+                    // A NaN element must fail too.
+                    worst = if d.is_nan() || worst.is_nan() { f64::NAN } else { worst.max(d) };
+                    scale = scale.max(v.abs());
+                }
+            }
+            println!("{label:16} {name:14} max |H - H_ref| = {worst:.2e}  max |H_ref| = {scale:.2e}  asym {:.1e}", fd.max_asymmetry);
+            if worst.is_nan() || worst > tol {
+                failures.push(format!("{label} {name}: max |H - H_ref| = {worst:.3e} > {tol:e} Hartree/Bohr^2"));
+            }
+            n += 1;
+        }
+    }
+    assert!(n >= 4 * 18, "only {n} Hessian references");
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Translational invariance (theory.typ, below eq:d3-grad): Σ_A dE/dR_A = 0.
+#[test]
+fn gradient_sums_to_zero() {
+    let r = reference();
+    for (name, entry) in r["molecules"].as_object().unwrap() {
+        for (label, func, variant) in CASES {
+            let params = D3Parameters::for_functional(func, variant).unwrap();
+            let (_, g) = dispersion_energy_and_gradient(&molecule(entry), &params).unwrap();
+            for k in 0..3 {
+                let s: f64 = g.iter().map(|v| v[k]).sum();
+                assert!(s.abs() < 1e-12, "{label} {name}: Σ_A dE/dR_A[{k}] = {s:e}");
+            }
+        }
+    }
+}
+
+/// Every tests/molecules/*.xyz must have a D3 reference entry for the same geometry,
+/// so that a molecule added there is not silently left out of the tests above.
+#[test]
+fn every_test_molecule_has_a_reference() {
+    let r = reference();
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests").join("molecules");
+    let mut n = 0;
+    for f in std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display())) {
+        let path = f.unwrap().path();
+        if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("xyz")) {
+            continue;
+        }
+        n += 1;
+        let name = path.file_stem().unwrap().to_string_lossy().into_owned();
+        let entry = &r["molecules"][&name];
+        assert!(
+            entry.is_object(),
+            "tests/molecules/{name}.xyz has no entry in d3_reference.json; run tests/reference/gen_d3_reference.py"
+        );
+        let mol = Molecule::from_xyz(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let reference = molecule(entry);
+        assert_eq!(mol.atoms().len(), reference.atoms().len(), "{name}: number of atoms");
+        for (a, b) in mol.atoms().iter().zip(reference.atoms()) {
+            assert_eq!(a.z, b.z, "{name}: elements differ");
+            for k in 0..3 {
+                assert!((a.position[k] - b.position[k]).abs() < 1e-9, "{name}: geometry differs from the reference");
+            }
+        }
+    }
+    assert!(n > 0, "no XYZ files in {}", dir.display());
+}
+
+/// B3LYP/STO-3G water dimer (geometry of d3_reference.json) with a coarse grid:
+/// small enough for an SCF gradient in the test suite.
+fn water_dimer_calculation() -> Calculation {
+    let mol = molecule(&reference()["molecules"]["water_dimer"]);
+    let grid = GridSettings { n_radial: 30, n_theta: 10 };
+    Calculation::new(&mol, "b3lyp", "sto-3g").unwrap().with_grid(grid)
+}
+
+/// theory.typ eq:d3-total through `Calculation`: the D3 energy and gradient are
+/// added to the SCF ones exactly, and without dispersion the results are the SCF
+/// ones (no dispersion fields, energy and gradient unchanged bit for bit).
+#[test]
+fn calculation_adds_dispersion_to_energy_and_gradient() {
+    let plain = water_dimer_calculation();
+    assert!(plain.dispersion().is_none());
+    for variant in [D3Variant::Bj, D3Variant::Zero] {
+        let params = D3Parameters::for_functional("b3lyp", variant).unwrap();
+        let calc = plain.clone().with_dispersion(variant).unwrap();
+        assert_eq!(calc.dispersion(), Some(&params));
+        let (e_ref, g_ref) = dispersion_energy_and_gradient(calc.molecule(), &params).unwrap();
+
+        let sp = calc.energy().unwrap();
+        assert_eq!(sp.dispersion_energy, Some(e_ref), "{variant:?}");
+        assert_eq!(sp.energy, sp.scf.energy + e_ref, "{variant:?}");
+
+        let gr = calc.gradient().unwrap();
+        assert_eq!(gr.dispersion_energy, Some(e_ref), "{variant:?}");
+        assert_eq!(gr.dispersion_gradient.as_ref(), Some(&g_ref), "{variant:?}");
+        assert_eq!(gr.energy, gr.scf.energy + e_ref, "{variant:?}");
+        let total = gr.components.total();
+        for (a, (g, (s, d))) in gr.gradient.iter().zip(total.iter().zip(&g_ref)).enumerate() {
+            for k in 0..3 {
+                assert_eq!(g[k], s[k] + d[k], "{variant:?} atom {a}");
+            }
+        }
+    }
+
+    // No dispersion: the fields are empty and energy/gradient are the SCF values.
+    let sp = plain.energy().unwrap();
+    assert_eq!(sp.dispersion_energy, None);
+    assert_eq!(sp.energy, sp.scf.energy);
+    let gr = plain.gradient().unwrap();
+    assert_eq!((gr.dispersion_energy, gr.dispersion_gradient.as_ref()), (None, None));
+    assert_eq!(gr.energy, gr.scf.energy);
+    assert_eq!(gr.gradient, gr.components.total());
+    // Removing the correction again gives the plain calculation.
+    let removed = plain.clone().with_dispersion(D3Variant::Bj).unwrap().with_dispersion_parameters(None);
+    assert_eq!(removed.energy().unwrap().energy, sp.energy);
+}
+
+/// The optimizer minimizes E_SCF + E_disp (eq:d3-total): its first evaluation is the
+/// D3 energy and gradient of the start geometry, and the returned gradient is the
+/// total gradient at the returned geometry.
+#[test]
+fn optimization_includes_dispersion() {
+    let calc = water_dimer_calculation().with_dispersion(D3Variant::Bj).unwrap();
+    let start = calc.gradient().unwrap();
+    let settings = OptimizerSettings { max_steps: 2, error_if_not_converged: false, ..OptimizerSettings::default() };
+    let opt = calc.optimize(&settings).unwrap();
+    assert_eq!(opt.history[0].energy, start.energy);
+    let max_g = start.gradient.iter().flatten().fold(0.0_f64, |m, v| m.max(v.abs()));
+    assert_eq!(opt.history[0].max_gradient, max_g);
+    // At the final geometry: same total as a fresh D3 gradient there. The SCF of the
+    // optimization started from the previous density, so allow its convergence error.
+    let end = calc.clone().with_molecule(&opt.molecule).gradient().unwrap();
+    assert!((opt.energy - end.energy).abs() < 1e-9, "E_opt {} vs {}", opt.energy, end.energy);
+    let worst = opt.gradient.iter().flatten().zip(end.gradient.iter().flatten()).fold(0.0_f64, |m, (a, b)| m.max((a - b).abs()));
+    assert!(worst < 1e-7, "max |g_opt - g| = {worst:e}");
+    // The D3 part is far larger than that tolerance, so the check above sees it.
+    let d3_max = end.dispersion_gradient.unwrap().iter().flatten().fold(0.0_f64, |m, v| m.max(v.abs()));
+    assert!(d3_max > 1e-5, "D3 gradient too small to test: {d3_max:e}");
+}
+
+/// HF and functionals without published D3 parameters are an error, unless the
+/// parameters are given explicitly.
+#[test]
+fn calculation_dispersion_needs_parameters() {
+    let mol = Molecule::from_symbols(&["H", "H"], &[[0.0; 3], [0.0, 0.0, 0.74]], Unit::Angstrom, 0).unwrap();
+    for method in ["hf", "blyp", "svwn5"] {
+        let calc = Calculation::new(&mol, method, "sto-3g").unwrap();
+        assert!(matches!(calc.with_dispersion(D3Variant::Bj), Err(QcError::InvalidInput(_))), "{method}");
+    }
+    let params = D3Parameters::new(D3Damping::Bj { s6: 1.0, a1: 0.4, s8: 1.0, a2: 5.0 }).unwrap();
+    let calc = Calculation::new(&mol, "hf", "sto-3g").unwrap().with_dispersion_parameters(Some(params));
+    let sp = calc.energy().unwrap();
+    let e_disp = dispersion_energy(&mol, &params).unwrap();
+    assert_eq!(sp.dispersion_energy, Some(e_disp));
+    assert_eq!(sp.energy, sp.scf.energy + e_disp);
+}
+
+#[test]
+fn functional_names_and_variants() {
+    let bj = D3Parameters::for_functional("B3LYP", D3Variant::Bj).unwrap();
+    assert_eq!(D3Parameters::for_functional("b3lyp5", D3Variant::Bj).unwrap(), bj);
+    assert_eq!(
+        D3Parameters::for_functional("CAM-B3LYP", D3Variant::Zero).unwrap(),
+        D3Parameters::for_functional("cam_b3lyp", D3Variant::Zero).unwrap()
+    );
+    assert_ne!(bj, D3Parameters::for_functional("b3lyp", D3Variant::Zero).unwrap());
+    for name in ["pbe", "hf", "blyp", ""] {
+        assert!(matches!(D3Parameters::for_functional(name, D3Variant::Bj), Err(QcError::InvalidInput(_))), "{name}");
+    }
+}

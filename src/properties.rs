@@ -5,7 +5,7 @@ use crate::integrals::dipole;
 use crate::linalg::Matrix;
 use crate::molecule::Molecule;
 
-/// Dipole moment (atomic units, origin at 0) for density matrix `p`. theory.typ eq:dipole
+/// Dipole moment (atomic units, origin at 0) for density matrix `p`. theory.typ eq:dipole UNCHECKED(Szabo1996)
 pub fn dipole_moment(mol: &Molecule, basis: &Basis, p: &Matrix) -> [f64; 3] {
     let ints = dipole(basis, [0.0; 3]);
     let mut mu = [0.0; 3];

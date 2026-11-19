@@ -1,5 +1,5 @@
-//! Water: RHF/6-31G* and B3LYP/6-31G single points, analytic gradients and
-//! geometry optimizations.
+//! Water: RHF/6-31G*, B3LYP/6-31G and CAM-B3LYP/6-31G single points, analytic
+//! gradients and geometry optimizations.
 //!
 //! Run with `cargo run --release --example h2o`.
 
@@ -37,7 +37,7 @@ fn main() -> Result<()> {
     let (r1, r2, a) = geometry(&mol);
     println!("start geometry: r(OH) = {r1:.4} / {r2:.4} Å, angle(HOH) = {a:.2}°\n");
 
-    for (method, basis) in [("hf", "6-31g*"), ("b3lyp", "6-31g")] {
+    for (method, basis) in [("hf", "6-31g*"), ("b3lyp", "6-31g"), ("cam-b3lyp", "6-31g")] {
         let label = format!("{}/{}", method.to_uppercase(), basis.to_uppercase());
         println!("=== {label} ===");
         let calc = Calculation::new(&mol, method, basis)?;

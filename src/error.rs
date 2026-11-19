@@ -44,7 +44,7 @@ impl fmt::Display for QcError {
             QcError::LinearDependence(s) => {
                 write!(f, "basis is linearly dependent (smallest overlap eigenvalue {s:e})")
             }
-            QcError::EigenNotConverged => write!(f, "Jacobi eigensolver did not converge"),
+            QcError::EigenNotConverged => write!(f, "symmetric eigensolver did not converge"),
             QcError::SingularMatrix => write!(f, "singular linear system"),
             QcError::ScfNotConverged { iterations, delta_e, max_error } => write!(
                 f,

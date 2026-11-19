@@ -1,5 +1,5 @@
 //! Geometry optimization: quasi-Newton BFGS with a trust radius in Cartesian
-//! coordinates (theory.typ section 11, eq:bfgs).
+//! coordinates (theory.typ section 11, eq:bfgs). UNCHECKED(Fletcher1970)
 //!
 //! [`bfgs_minimize`] is generic over a function returning (energy, gradient) at a
 //! coordinate vector, so it can be tested on model functions; the molecular driver is

@@ -122,7 +122,7 @@ fn rks_single_points_match_pyscf() {
             elapsed.as_secs_f64()
         );
     }
-    assert_eq!(n_cases, 19, "expected 19 RKS reference entries (13 + 6 CAM-B3LYP)");
+    assert_eq!(n_cases, 21, "expected 21 RKS reference entries (13 + 6 CAM-B3LYP + 2 with f functions)");
     println!("max deviations over all RKS cases:");
     for (what, m) in &report.maxima {
         println!("  {what:18} {m:.3e}");

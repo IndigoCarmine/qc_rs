@@ -5,7 +5,9 @@ Usage (from the repository root):
 
 Writes tests/reference/pyscf_reference.json.  With --hessians-only, only the
 "hessians" section is (re)computed and the other sections of the existing JSON
-are kept unchanged (a full run reproduces them only to about 1e-9).
+are kept unchanged (a full run reproduces them only to about 1e-9).  With
+--append-f, only the F_SINGLE_POINTS entries not yet present are computed and
+appended to the end of "single_points"; everything else is kept unchanged.
 
 The basis sets are read from data/basis/*.gbs (Basis Set Exchange, Gaussian94
 format) and handed to PySCF explicitly, so that both programs use exactly the
@@ -61,7 +63,9 @@ def load_gbs(name):
 
 
 BASIS = {n: load_gbs(f) for n, f in [("sto-3g", "sto-3g"), ("6-31g", "6-31g"),
-                                     ("6-31g*", "6-31gs"), ("6-31g**", "6-31gss")]}
+                                     ("6-31g*", "6-31gs"), ("6-31g**", "6-31gss"),
+                                     ("6-311g**", "6-311gss"), ("6-31g(2df,p)", "6-31g_2df_p"),
+                                     ("6-311g(2df,2pd)", "6-311g_2df_2pd")]}
 
 # Geometries in Angstrom (converted to Bohr below).  Deliberately not at
 # equilibrium so that the gradients are non-trivial; no symmetry in "h2o_dist".
@@ -297,6 +301,52 @@ def main_hessians_only():
     print("wrote", OUT_PATH)
 
 
+# Single points with f functions (and one 6-311G** case), added after the original list.  The
+# 6-31G(2df,p) data (H/He with two P shells) is read from data/basis like every other set, so
+# PySCF uses exactly our exponents and coefficients, not its own set of the same name.
+F_SINGLE_POINTS = [
+    ("h2o", "6-311g**", "rhf", False),
+    ("h2o", "6-31g(2df,p)", "rhf", False),
+    ("h2o", "6-31g(2df,p)", "rhf", True),
+    ("h2o_dist", "6-31g(2df,p)", "rhf", False),
+    ("hcl", "6-31g(2df,p)", "rhf", False),
+    ("h2o", "6-311g(2df,2pd)", "rhf", False),
+    ("h2o", "6-31g(2df,p)", "b3lypg", False),
+    ("h2o", "6-31g(2df,p)", "camb3lyp", False),
+]
+
+
+def f_single_points():
+    return [single_point(geom, basis, method, cart=cart) for geom, basis, method, cart in F_SINGLE_POINTS]
+
+
+def _key(rec):
+    return (rec["name"], rec["basis"], rec["method"], rec["cartesian"])
+
+
+def main_append_f():
+    """Append the F_SINGLE_POINTS entries missing from the existing JSON to the end of
+    'single_points'.  A full regeneration reproduces the committed values only to ~1e-9 (SCF
+    convergence), so everything already present is kept exactly as it is; this is checked below."""
+    with open(OUT_PATH) as f:
+        old_text = f.read()
+    out = json.loads(old_text)
+    old = json.loads(old_text)
+    have = {_key(r) for r in out["single_points"]}
+    n_old = len(out["single_points"])
+    for geom, basis, method, cart in F_SINGLE_POINTS:
+        if (geom, basis, method, cart) not in have:
+            out["single_points"].append(single_point(geom, basis, method, cart=cart))
+    # Existing content must be untouched: same values, and the serialised old prefix is identical.
+    assert out["single_points"][:n_old] == old["single_points"]
+    assert {k: v for k, v in out.items() if k != "single_points"} == \
+        {k: v for k, v in old.items() if k != "single_points"}
+    assert json.dumps(old, indent=1) == old_text.replace("\r\n", "\n"), "existing JSON is not in canonical form"
+    with open(OUT_PATH, "w") as f:
+        json.dump(out, f, indent=1)
+    print(f"wrote {OUT_PATH} ({len(out['single_points']) - n_old} single points appended)")
+
+
 def main():
     sp = []
     # --- RHF ---
@@ -325,6 +375,7 @@ def main():
         sp.append(single_point(geom, basis, "camb3lyp"))
     # What does the plain name "b3lyp" mean in this PySCF version?
     sp.append(single_point("h2o", "6-31g", "b3lyp", grad=False))
+    sp.extend(f_single_points())
 
     opt = [
         optimize("h2o_dist", "6-31g*", "rhf"),
@@ -352,5 +403,7 @@ def main():
 if __name__ == "__main__":
     if "--hessians-only" in sys.argv[1:]:
         main_hessians_only()
+    elif "--append-f" in sys.argv[1:]:
+        main_append_f()
     else:
         main()

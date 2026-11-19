@@ -3,7 +3,7 @@
 //!
 //! Primitive integrals come from [`crate::hermite`]; this module applies the
 //! contraction coefficients d̃_k, the Cartesian factors c_lmn (eq:contracted) and UNCHECKED(Helgaker2000)
-//! the spherical d transformation (eq:sph-d). UNCHECKED(Schlegel1995)
+//! the spherical d and f transformations (eq:sph-d, eq:sph-f). UNCHECKED(Schlegel1995)
 
 use crate::basis::{Basis, Shell, cartesian_components, cartesian_norm, transform_axis};
 use crate::hermite::{HermiteR, PrimitivePair, erf_attenuation};

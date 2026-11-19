@@ -70,7 +70,7 @@ PySCF との数値一致（`tests/`）は全項目で確認済みですが、そ
 |---|---|---|---|---|---|
 | McMurchie1978 | L. E. McMurchie, E. R. Davidson, *J. Comput. Phys.* **26**, 218 (1978) | 10.1016/0021-9991(78)90092-X | `mcmurchie1978.pdf` | Hermite 展開係数と Hermite Coulomb 積分の漸化式、重なり・運動エネルギー・核引力・2電子積分の式 | あり（ただしタイプ打ちのプレプリント UCRL-13791、頁 -1-〜-20-。雑誌版の式番号は未確認） |
 | Haser1989 | M. Häser, R. Ahlrichs, *J. Comput. Chem.* **10**, 104 (1989) | 10.1002/jcc.540100111 | `haser1989.pdf` | Schwarz の不等式による選別 | なし |
-| Schlegel1995 | H. B. Schlegel, M. J. Frisch, *Int. J. Quantum Chem.* **54**, 83 (1995) | 10.1002/qua.560540202 | `schlegel1995.pdf` | デカルト d から球面調和 d への変換係数 | なし |
+| Schlegel1995 | H. B. Schlegel, M. J. Frisch, *Int. J. Quantum Chem.* **54**, 83 (1995) | 10.1002/qua.560540202 | `schlegel1995.pdf` | デカルト d・f から球面調和 d・f への変換係数 | なし |
 | Adamson1999 | R. D. Adamson, J. P. Dombroski, P. M. W. Gill, *J. Comput. Chem.* **20**, 921 (1999) | 10.1002/(SICI)1096-987X(19990715)20:9<921::AID-JCC3>3.0.CO;2-K | `adamson1999.pdf` | erfc（短距離）Coulomb 積分の計算法（PRISM の基本積分 [m]_ω、式 (11)–(13)）。erf の積分は式 (1) と式 (11) の第2項から従う。`eq:eri-erf` の出典（導出による）。Tawada 2004 が積分の評価について引用している論文 | あり |
 | GillAdamsonPople1996 | P. M. W. Gill, R. D. Adamson, J. A. Pople, *Mol. Phys.* **88**, 1005 (1996) | 10.1080/00268979609484488 | `gill1996_molphys.pdf` | Coulomb 減衰交換汎関数と、Gauss 関数上の減衰した2電子積分（Yanai 2004 が引用している論文） | なし |
 | Gill1996 | P. M. W. Gill, R. D. Adamson, *Chem. Phys. Lett.* **261**, 105 (1996) | 10.1016/0009-2614(96)00931-1 | `gill1996_attenuated.pdf` | 減衰演算子の族 CAP(m) の論文。書き起こしてみると、`eq:eri-erf`（一般の角運動量での erf 減衰積分）の直接の出典ではなかった。照合には上の2本が要る | あり |

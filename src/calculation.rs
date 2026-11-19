@@ -191,7 +191,8 @@ impl Calculation {
     /// `method` is "hf" or a functional name accepted by [`Functional::from_name`]
     /// (e.g. "b3lyp", "blyp", "svwn5", "cam-b3lyp"); `basis` is a built-in basis set name
     /// ("sto-3g", "6-31g", "6-31g*", "6-31g**"). Spherical d functions, the default DFT
-    /// grid of theory.typ section 8.4, default SCF options and no dispersion correction.
+    /// grid of theory.typ `<sec:rks>` ("既定の格子"), default SCF options and no dispersion
+    /// correction.
     pub fn new(molecule: &Molecule, method: &str, basis: &str) -> Result<Self> {
         let calc = Calculation {
             molecule: molecule.clone(),

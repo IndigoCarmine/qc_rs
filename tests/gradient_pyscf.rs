@@ -105,7 +105,7 @@ fn gradients_match_pyscf() {
             failures.push(format!("{case}: RHF gradient not invariant (force {force:.1e}, torque {torque:.1e})"));
         }
     }
-    assert_eq!(n_cases, 29, "expected 29 reference gradients (23 + 6 CAM-B3LYP)");
+    assert_eq!(n_cases, 37, "expected 37 reference gradients (23 + 6 CAM-B3LYP + 8 with 6-311G** or f functions)");
     println!("max |g - g_pyscf|: RHF {worst_rhf:.2e}, DFT {worst_dft:.2e}");
     assert!(failures.is_empty(), "failures:\n{}", failures.join("\n"));
 }

@@ -96,7 +96,7 @@ fn rhf_single_points_match_pyscf() {
         report.check(&case, "scf_summary.exc", (c.exchange - summary["exc"].as_f64().unwrap()).abs(), 1e-6);
 
         if !cart {
-            // PySCF does not normalize individual Cartesian d components, so S differs there.
+            // PySCF does not normalize individual Cartesian d and f components, so S differs there.
             let s_eig = symmetric_eigen(&overlap(&basis)).unwrap().values;
             report.check(&case, "ovlp_eigvals", max_dev(&s_eig, &f64s(&entry["ovlp_eigvals"])), 1e-8);
         }
@@ -113,7 +113,7 @@ fn rhf_single_points_match_pyscf() {
             elapsed.as_secs_f64()
         );
     }
-    assert_eq!(n_cases, 11, "expected 11 RHF reference entries");
+    assert_eq!(n_cases, 17, "expected 17 RHF reference entries (11 + 6 with 6-311G** or f functions)");
     println!("max deviations over all RHF cases:");
     for (what, m) in &report.maxima {
         println!("  {what:18} {m:.3e}");

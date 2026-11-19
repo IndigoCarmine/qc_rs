@@ -27,6 +27,7 @@ SOURCES = {
     "vnn": ["Szabo1996"], "vnn-grad": ["Szabo1996"],
     "prim": ["Helgaker2000"], "prim-norm": ["Helgaker2000"], "contracted": ["Helgaker2000"],
     "contr-norm": ["Helgaker2000"], "cart-norm": ["Helgaker2000"], "sph-d": ["Schlegel1995"],
+    "sph-f": ["Schlegel1995"],
     "gpt": ["McMurchie1978"], "hermite-exp": ["McMurchie1978"], "E-rec": ["McMurchie1978"],
     "ovlp-1d": ["McMurchie1978"], "ovlp": ["McMurchie1978"], "kin-1d": ["McMurchie1978"],
     "kin": ["McMurchie1978"], "dip-1d": ["McMurchie1978"], "R-rec": ["McMurchie1978"],

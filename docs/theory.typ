@@ -75,7 +75,7 @@ p: $(x, y, z)$、d: $(x x, x y, x z, y y, y z, z z)$、
 *SP 殻*（Gaussian94 形式の `SP`）は同じ指数を共有する s 殻と p 殻に分けて扱う
 （2列目が s の係数、3列目が p の係数）。
 
-== 球面調和 d 関数（5d）
+== 球面調和 d・f 関数（5d・7f）
 
 d 殻は既定で実球面調和関数 5 成分に変換する（デカルト 6 成分のまま使うこともできる）。
 規格化済みデカルト成分 $chi_(x x), chi_(x y), ...$ を用いて、$m = -2, ..., 2$ の順に
@@ -85,14 +85,39 @@ $ d_(-2) &= chi_(x y), quad d_(-1) = chi_(y z), quad d_(+1) = chi_(x z), \
   d_(+2) &= sqrt(3)/2 (chi_(x x) - chi_(y y)) $ <eq:sph-d>
 
 すべて規格化されている（$bra(chi_(x x)) ket(chi_(y y)) = 1 slash 3$ を使う）。
-s, p 殻はデカルトのまま。積分・微分積分はデカルト成分で計算し、最後に @eq:sph-d の
-$5 times 6$ 行列を各添字に掛ける。基底殻は $L <= 2$ を対象とするが、
-原始積分の漸化式は任意の $L$ で動くように実装する（勾配で $L + 1$ が必要になる）。
+
+f 殻も同様に実球面調和関数 7 成分に変換する（デカルト 10 成分のまま使うこともできる）。
+規格化済みデカルト成分（辞書式に $x x x, x x y, x x z, x y y, x y z, x z z, y y y, y y z, y z z, z z z$）を用い、
+$a = sqrt(5 slash 8)$、$b = sqrt(3 slash 8)$ として、$m = -3, ..., 3$ の順に
+
+$ f_(-3) &= (3a) / sqrt(5) chi_(x x y) - a chi_(y y y), quad f_(-2) = chi_(x y z), \
+  f_(-1) &= (4b) / sqrt(5) chi_(y z z) - b / sqrt(5) chi_(x x y) - b chi_(y y y), \
+  f_0 &= chi_(z z z) - 3 / (2 sqrt(5)) (chi_(x x z) + chi_(y y z)), \
+  f_(+1) &= (4b) / sqrt(5) chi_(x z z) - b chi_(x x x) - b / sqrt(5) chi_(x y y), \
+  f_(+2) &= sqrt(3)/2 (chi_(x x z) - chi_(y y z)), quad
+  f_(+3) = a chi_(x x x) - (3a) / sqrt(5) chi_(x y y) $ <eq:sph-f>
+
+*導出*：実立体調和関数（正の定数倍を除く）
+$y(3x^2 - y^2)$、$x y z$、$y(4z^2 - x^2 - y^2)$、$z(2z^2 - 3x^2 - 3y^2)$、$x(4z^2 - x^2 - y^2)$、
+$z(x^2 - y^2)$、$x(x^2 - 3y^2)$ の各単項式 $x^l y^m z^n$ を、@eq:cart-norm により
+$chi_(l m n) slash c_(l m n)$ に置き換え（$L = 3$ では $c_(x x x) = 1$、$c_(x x y) = sqrt(5)$、$c_(x y z) = sqrt(15)$ など）、
+デカルト成分の一中心重なり $S$ で規格化する。同じ手順を $L = 2$ に当てはめると @eq:sph-d が再現され、
+符号と順序の規約は d と同じである。$m > 0$ が $cos$ 型（$x$ を含む側）、$m < 0$ が $sin$ 型。
+
+*数値確認*：@eq:sph-f の $7 times 10$ 行列 $T$ について $T S T^T = I_7$（誤差 $10^(-15)$ 程度）、
+また $T$ の各行は $r^2$ を掛けた p 型の組 $r^2 x, r^2 y, r^2 z$ と $S$ について直交する
+（球面調和 f は 10 成分から $r^2 p$ の 3 成分を除いた残りである）。
+出典は Schlegel・Frisch（1995）だが、論文はまだ入手しておらず係数は*未照合*である
+（上の導出と数値確認による）。
+
+s, p 殻はデカルトのまま。積分・微分積分はデカルト成分で計算し、最後に @eq:sph-d、@eq:sph-f の
+$(2L + 1) times (L + 1)(L + 2) slash 2$ 行列を各添字に掛ける。基底殻は $L <= 3$ を対象とするが、
+原始積分の漸化式は任意の $L$ で動くように実装する（勾配で $L + 1 = 4$ まで必要になる）。
 
 == 基底ファイル（Gaussian94 形式）
 
 `data/basis/*.gbs`（Basis Set Exchange より取得）。`!` で始まる行はコメント。元素ごとに
-`記号 0` の行で始まり `****` で終わる。殻は `種類 原始数 スケール` の行（種類は `S`, `P`, `D`, `SP`）に
+`記号 0` の行で始まり `****` で終わる。殻は `種類 原始数 スケール` の行（種類は `S`, `P`, `D`, `F`, `SP`）に
 続いて原始数ぶんの行（指数、係数…）が並ぶ。数値の指数部は `D` で書かれている（`0.18D+02`）。
 
 = Gauss 積と Hermite 展開 <sec:hermite>
@@ -341,7 +366,7 @@ $ & tilde(J)_(mu nu) += 2 w (mu nu|lambda sigma) P_(lambda sigma), quad
 $alpha (mu nu|lambda sigma) + beta (mu nu|lambda sigma)_omega$ に置き換えて $K^"x"$（@eq:cam-k）を作る。
 同じ原始関数の組の Hermite 展開係数 $E$ を2つの演算子で共有し、$R$ だけを2回求める。
 計算は規格化したデカルト成分で行い、密度を $P^"cart" = T^T P T$、結果を $J = T J^"cart" T^T$ で変換する
-（$T$ は @eq:sph-d の行列、デカルト d では単位行列）。
+（$T$ は @eq:sph-d、@eq:sph-f の行列、デカルト d・f では単位行列）。
 
 *密度で重みづけた Schwarz 選別*：四つ組が $J$ と $K$ に寄与するときに掛かる密度のブロックは
 $P_(a b), P_(c d)$（$J$）と $P_(a c), P_(a d), P_(b c), P_(b d)$（$K$）なので、
@@ -688,7 +713,7 @@ $ partial / (partial A_x) g_(l m n)(vb(r); a, vb(A)) = 2a thin g_(l+1, m, n) - l
 
 $ partial / (partial A_x) bra(g_(l_1 m_1 n_1)^a) ket(g_b) = 2a bra(g_(l_1 + 1, m_1 n_1)^a) ket(g_b) - l_1 bra(g_(l_1 - 1, m_1 n_1)^a) ket(g_b) $
 
-運動エネルギー・核引力・ERI も同じ規則に従う。球面調和への変換 @eq:sph-d は微分と可換。
+運動エネルギー・核引力・ERI も同じ規則に従う。球面調和への変換 @eq:sph-d、@eq:sph-f は微分と可換。
 
 == 1電子項
 

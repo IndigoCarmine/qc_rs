@@ -1,3 +1,7 @@
+現在開発中です。基本的に利用はお勧めしません。
+
+
+
 # qc_rs
 
 Gauss 基底による閉殻 Hartree–Fock（RHF）と Kohn–Sham DFT（RKS）の Rust 実装です。
